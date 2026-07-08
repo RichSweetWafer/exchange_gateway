@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "downstream",
+    "exchange_mock",
+    "shared_lib",
+    "high_speed_gateway"
+]
+resolver = "2"

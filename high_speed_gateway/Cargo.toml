@@ -1,0 +1,14 @@
+[package]
+name = "high_speed_gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.52.1", features = ["full"] }
+tokio-stream = "0.1.18"
+tonic = "0.14.6"
+async-stream = "0.3.6"
+shared_lib = { path = "../shared_lib" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+clap = { version = "4.6.1", features = ["derive"] }

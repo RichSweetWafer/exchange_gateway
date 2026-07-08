@@ -1,0 +1,11 @@
+[package]
+name = "exchange_mock"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.52.1", features = ["full"] }
+rand = "0.10.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+clap = { version = "4.6.1", features = ["derive"] }

@@ -1,0 +1,19 @@
+syntax = "proto3";
+package market;
+
+service MarketDataStreamer {
+    rpc StreamTicks (StreamRequest) returns (stream PriceTick);
+}
+
+message StreamRequest {
+    string symbol = 1;
+}
+
+message PriceTick {
+    string symbol = 1;
+    double bid_price = 2;
+    int64  bid_volume = 3;
+    double ask_price = 4;
+    int64  ask_volume = 5;
+    int64  timestamp_ns = 6;
+}

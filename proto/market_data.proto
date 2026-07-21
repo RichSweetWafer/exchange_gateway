@@ -11,9 +11,9 @@ message StreamRequest {
 
 message PriceTick {
     string symbol = 1;
-    double bid_price = 2;
-    int64  bid_volume = 3;
-    double ask_price = 4;
-    int64  ask_volume = 5;
-    int64  timestamp_ns = 6;
+    int64 bid_price_fp = 2;
+    int64 bid_volume = 3;
+    int64 ask_price_fp = 4;
+    int64 ask_volume = 5;
+    int64 timestamp_ns = 6;
 }

@@ -3,6 +3,12 @@ name = "high_speed_gateway"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+client = []
+exchange = []
+broker = []
+
 [dependencies]
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = "0.1.18"

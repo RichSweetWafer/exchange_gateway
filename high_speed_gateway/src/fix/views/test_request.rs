@@ -13,6 +13,7 @@ impl<'a, const F: usize, const B: usize> TestRequestView<'a, F, B> {
         Self { msg }
     }
 
+    #[inline(always)]
     pub fn test_request_id() -> Option<&'a [u8]> {
         msg.get_field(112)
     }

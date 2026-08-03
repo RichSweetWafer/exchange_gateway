@@ -13,6 +13,19 @@ impl<'a, const F: usize, const B: usize> LogoutView<'a, F, B> {
         Self { msg }
     }
 
+    #[inline(always)]
+    pub fn text(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(58)
+    }
 
+    #[inline(always)]
+    pub fn encoded_text_length(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(354)
+    }
+
+    #[inline(always)]
+    pub fn encoded_text(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(355)
+    }
 
 }

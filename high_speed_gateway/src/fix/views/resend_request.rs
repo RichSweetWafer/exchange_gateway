@@ -13,10 +13,12 @@ impl<'a, const F: usize, const B: usize> ResendRequestView<'a, F, B> {
         Self { msg }
     }
 
+    #[inline(always)]
     pub fn first_message() -> Option<&'a [u8]> {
         msg.get_field(7)
     }
 
+    #[inline(always)]
     pub fn last_message() -> Option<&'a [u8]> {
         msg.get_field(16)
     }

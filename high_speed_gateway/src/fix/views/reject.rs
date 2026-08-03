@@ -12,32 +12,39 @@ impl<'a, const F: usize, const B: usize> RejectView<'a, F, B> {
         Self { msg }
     }
 
+    #[inline(always)]
     /// Sequence number of the rejected message
     pub fn seq_num() -> Option<&'a [u8]> {
         msg.get_field(45)
     }
 
+    #[inline(always)]
     /// Tag of the rejected message
     pub fn tag() -> Option<&'a [u8]> {
         msg.get_field(371)
     }
 
+    #[inline(always)]
     pub fn msg_type() -> Option<&'a [u8]> {
         msg.get_field(372)
     }
 
+    #[inline(always)]
     pub fn reason() -> Option<&'a [u8]> {
         msg.get_field(373)
     }
 
+    #[inline(always)]
     pub fn reason_text() -> Option<&'a [u8]> {
         msg.get_field(58)
     }
     
+    #[inline(always)]
     pub fn encoded_reason_len() -> Option<&'a [u8]> {
         msg.get_field(354)
     }
 
+    #[inline(always)]
     pub fn encoded_reason_text() -> Option<&'a [u8]> {
         msg.get_field(355)
     }

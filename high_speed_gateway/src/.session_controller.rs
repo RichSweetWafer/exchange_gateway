@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-
+use fix::views::{LogonView, LogoutView, Heartbeat};
 
 pub enum SessionState {
     Disconnected,
@@ -11,12 +11,12 @@ pub enum SessionState {
 
 pub struct SessionController {
     pub state: SessionState,
-    pub sender_comp_id: String, // NB: Keep in mind -- using String == memory allocation
-    pub target_comp_id: String, // Same
+    pub sender_comp_id: [u8; 512],
+    pub target_comp_id: [u8; 512],
 
     // Sequence tracking
-    pub next_outbound_seq: u32,
-    pub next_inbound_seq: u32,
+    pub next_outbound_seq: SeqNum,
+    pub next_inbound_seq: SeqNum,
 
     // Heartbeat
     pub heartbeat_interval: Duration,
@@ -30,4 +30,5 @@ pub struct SessionController {
 
 impl SessionController {
     
+    pub fn 
 }

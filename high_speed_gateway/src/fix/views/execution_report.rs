@@ -26,6 +26,21 @@ impl<'a, const F: usize, const B: usize> ExecutionReportView<'a, F, B> {
     }
 
     #[inline(always)]
+    pub fn exec_id(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(17)
+    }
+
+    #[inline(always)]
+    pub fn exec_type(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(150)
+    }
+
+    #[inline(always)]
+    pub fn order_status(&self) -> Option<&'a [u8]> {
+        self.msg.get_field(39)
+    }
+
+    #[inline(always)]
     pub fn price(&self) -> Option<&'a [u8]> {
         self.msg.get_field(44)
     }

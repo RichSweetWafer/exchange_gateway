@@ -42,12 +42,12 @@ impl<'a, const F: usize, const B: usize> LogonView<'a, F, B> {
 
     #[inline(always)]
     pub fn next_expected_sequence(&self) -> Option<&'a [u8]> {
-        self.msg.get_field(554)
+        self.msg.get_field(789)
     }
 
     #[inline(always)]
     pub fn max_message_size(&self) -> Option<&'a [u8]> {
-        self.msg.get_field(554)
+        self.msg.get_field(383)
     }
 
     // TODO:
@@ -55,6 +55,7 @@ impl<'a, const F: usize, const B: usize> LogonView<'a, F, B> {
     // RefMsgType - 372 - supported message type
     // MsgDirection - 385 - supported message type direction 
     // from the point of view of the sender of the Logon
+    // Return an iterator?
 
     #[inline(always)]
     /// The session will be considered for testing

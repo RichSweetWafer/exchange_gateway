@@ -24,9 +24,9 @@ pub enum MessageView<'a, const F: usize, const B: usize> {
     // Discovery
     MarketData(&'a MarketDataView<F, B>), // Snapshots and Incremental
     MarketDataReject(&'a MarketDataRejectView<F, B>),
-    // MarketDataRequest(&'a FixMessage<F, B>),
-    // SecurityDefinitionsRequest(&'a FixMessage<F, B>),
-    // SecurityDefinitions(&'a FixMessage<F, B>),
+    // MarketDataRequest(&'a Message<F, B>),
+    // SecurityDefinitionsRequest(&'a Message<F, B>),
+    // SecurityDefinitions(&'a Message<F, B>),
 
     // Pre-post-trade
     AllocationReport(&'a AllocationReportView<F, B>),
@@ -36,7 +36,7 @@ pub enum MessageView<'a, const F: usize, const B: usize> {
     ExecutionReport(&'a ExecutionReportView<F, B>),
     OrderCancelReject(&'a OrderCancelRejectView<F, B>),
     // #[cfg(feature = "exchange")]
-    // NewOrderSingle(&'a FixMessage<F, B>),
+    // NewOrderSingle(&'a Message<F, B>),
     
-    Unsupported(&'a FixMessage<F, B>),
+    Unsupported(&'a Message<F, B>),
 }

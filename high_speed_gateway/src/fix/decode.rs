@@ -1,5 +1,3 @@
-use super::data_types::DataType;
-
 
 #[inline(always)]
 pub fn to_u16(bytes: &[u8]) -> Option<u16> {
@@ -58,5 +56,17 @@ pub fn to_usize(bytes: &[u8]) -> Option<usize> {
         Some(res as usize)
     } else {
         None
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_u16() {
+        
     }
 }

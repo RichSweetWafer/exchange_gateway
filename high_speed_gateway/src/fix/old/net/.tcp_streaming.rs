@@ -2,7 +2,7 @@
 
 
 
-pub fn process_socket_stream(mut stream: TcpStream, rx: &mut StreamingReceiver) {
+pub fn process_socket_stream(mut stream: TcpStream, rx: &mut Parser) {
 
     let mut chunk_buffer = [0; 1024]; // TODO: change
 

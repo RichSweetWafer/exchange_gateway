@@ -1,9 +1,9 @@
-use crate::fix::message::FixMessage;
+use crate::fix::message::Message;
 
 
 /// Supports heartbeat interval and encryption method retrieval
 pub struct LogonView<'a, const F: usize, const B: usize> {
-    msg: &'a FixMessage<F, B>
+    msg: &'a Message<F, B>
 }
 
 
@@ -11,7 +11,7 @@ pub struct LogonView<'a, const F: usize, const B: usize> {
 impl<'a, const F: usize, const B: usize> LogonView<'a, F, B> {
     
     #[inline(always)]
-    pub(crate) fn new(msg: &'a FixMessage<F, B>) -> Self {
+    pub(crate) fn new(msg: &'a Message<F, B>) -> Self {
         Self { msg }
     }
     

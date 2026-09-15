@@ -1,4 +1,4 @@
-use crate::fix::message::FixMessage;
+use crate::fix::message::Message;
 
 
 /// ExecutionReport message is used to:
@@ -10,13 +10,13 @@ use crate::fix::message::FixMessage;
 /// 6. reject orders
 /// 7. report post-trade fees calculations associated with a trade
 pub struct ExecutionReportView<'a, const F: usize, const B: usize> {
-    msg: &'a FixMessage<F, B>
+    msg: &'a Message<F, B>
 }
 
 impl<'a, const F: usize, const B: usize> ExecutionReportView<'a, F, B> {
     
     #[inline(always)]
-    pub(crate) fn new(msg: &'a FixMessage<F, B>) -> Self {
+    pub(crate) fn new(msg: &'a Message<F, B>) -> Self {
         Self { msg }
     }
 

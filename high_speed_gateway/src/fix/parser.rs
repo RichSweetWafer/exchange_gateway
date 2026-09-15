@@ -1,6 +1,6 @@
 use tracing::trace;
 
-use super::FixMessage;
+use super::Message;
 use super::flat_index_map::FlatIndexMap;
 
 use super::FixVersion;
@@ -34,9 +34,9 @@ struct StageState {
 }
 
 #[derive(Debug,Clone, Copy)]
-pub struct StreamingReceiver<const MAX_BUF: usize = 2048> {
+pub struct Parser<const MAX_BUF: usize = 2048> {
     buffer: [u8; MAX_BUF], // TODO: switch to ring buffer impl
-    tag_map: FlatIndexMap, 
+    fields: FlatIndexMap, 
     cursor: usize,         // Message parsing cursor
 
     // Parsing stages
@@ -78,7 +78,8 @@ impl StageState {
     }
 }
 
-impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
+impl<const MAX_BUF: usize> Parser<MAX_BUF> {
+    
     pub fn new(fix_version: FixVersion) -> Self {
         let mut expected_version_header = [0u8; 16];
         let header_prefix = b"8=FIX.";
@@ -92,7 +93,7 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
         Self {
             buffer: [0; MAX_BUF],
             cursor: 0,
-            tag_map: FlatIndexMap::new(), 
+            fields: FlatIndexMap::new(), 
             stage: RxStage::SearchingHeaderStart,
             stage_state: StageState::new(),
             expected_version_header,
@@ -116,12 +117,12 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
 
     pub fn clear(&mut self) {
         self.reset();
-        self.tag_map.clear();
+        self.fields.clear();
     }
 
     /// Feed one byte to the receiver.
     /// Returns: parsing result with optional buffer slice containing the message
-    pub fn feed_byte(&mut self, b: u8) -> Result<Option<FixMessage<'_>>, &'static str> {
+    pub fn feed_byte(&mut self, b: u8) -> Result<Option<Message<'_>>, &'static str> {
         if self.cursor >= MAX_BUF {
             self.reset();
             return Err("Streaming buffer bound limit reached");
@@ -137,9 +138,9 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
             RxStage::VerifyingChecksum => {
                 if self.verifying_checksum(b)? {
                     let end = self.cursor - 1;
-                    return Ok(Some(FixMessage {
+                    return Ok(Some(Message {
                                 raw: &self.buffer[..end],
-                                tag_map: &mut self.tag_map,
+                                fields: &mut self.fields,
                             }))
                 }
             }
@@ -231,6 +232,10 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
                     self.expected_length =
                         decode::to_usize(&self.buffer[offset..(offset + length)]).ok_or("Malformed Body Length field")?;
                     
+                    if self.expected_length + 16 > MAX_BUF {
+                        return Err("Could not fit message into buffer, skipping");
+                    }
+
                     self.stage_state.next_state();
                     self.actual_length = 0;
                     self.stage = RxStage::Reading;
@@ -263,7 +268,7 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
                 if let Some((offset, length)) = value_option {
                     
                     // TODO: FlatIndexMap is for unique fields only, add storage for repeating fields
-                    self.tag_map.insert(self.stage_state.field_tag, offset as u32, length as u32)?;
+                    self.fields.insert(self.stage_state.field_tag, offset as u32, length as u32)?;
                     trace!(
                         receiver_state = ?self.stage);
                     self.stage_state.next_state();
@@ -315,4 +320,68 @@ impl<const MAX_BUF: usize> StreamingReceiver<MAX_BUF> {
     }
 
 
+}
+
+
+
+
+#[cfg(test)]
+mod tests {
+
+
+    // let message = b"8=FIX.4.4\x019=148\x0135=D\x0134=1080\x0149=TESTBUY1\x0152=20180920-18:14:19.508\x0156=TESTSELL1\x0111=636730640278898634\x0115=USD\x0121=2\x0138=7000\x0140=1\x0154=1\x0155=MSFT\x0160=20180920-18:14:19.492\x0110=092\x01";
+    // let message = b"8=FIX.4.4\x019=75\x0135=A\x0134=1092\x0149=TESTBUY1\x0152=20180920-18:24:59.643\x0156=TESTSELL1\x0198=0\x01108=60\x0110=178\x01";
+    // let message = b"8=FIX.4.4\x019=148\x0135=D\x0134=1080\x0149=TESTBUY1\x0152=20180920-18:14:19.508\x0156=TESTSELL1\x0111=636730640278898634\x0115=USD\x0121=2\x0138=7000\x0140=1\x0154=1\x0155=MSFT\x0160=20180920-18:14:19.492\x0110=092\x01\x01\x018=FIX.4.4\x019=75\x0135=A\x0134=1293\x0149=TESTBUY1\x0152=20180920-18:24:59.643\x0156=TESTSELL1\x0198=0\x01108=60\x0110=178\x01";
+    
+
+    pub fn setup_tracing() {
+        #[cfg(debug_assertions)]
+        {
+            let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            // Captures logs so `cargo test` hides them unless a test fails or `--nocapture` is used
+            .with_test_writer() 
+            // Ignores errors if another thread already initialized the global subscriber
+            .try_init(); 
+        }
+    }
+
+    fn parse_message(message: &[u8]) {
+        setup_tracing();
+
+        let mut rx: Parser = Parser::new(FixVersion::Fix44);
+
+        for &b in message {
+            match rx.feed_byte(b) {
+                Ok(Some(parsed_message)) => {
+                    assert_eq!(parsed_message.get_msg_type()?, "D");
+                    // trace!(tag = 35, got_tag = parsed_message.get_str(35));
+                    // trace!(tag = 34, got_tag = parsed_message.get_str(34));
+                    // trace!(tag = 49, got_tag = parsed_message.get_str(49));
+                    // trace!(tag = 52, got_tag = parsed_message.get_str(52));
+                    // trace!(tag = 56, got_tag = parsed_message.get_str(56));
+                    // trace!(tag = 55, got_tag = parsed_message.get_str(55));
+                    // trace!(tag = 38, got_tag = match parsed_message.get_int(38) {
+                    //     Some(Ok(val)) => format!("{}", val),
+                    //     Some(Err(_)) => "ParsingError".to_string(),
+                    //     None => "Missing".to_string(),
+                    // });
+                    rx.clear();
+                },
+                Err(e) => {
+                    panic!("Test failed: {:?}", e);
+                },
+                Ok(None) => {
+                    // Message is incomplete yet
+                }
+            }
+        }
+        panic!("Test failed: parser did not produce a message");
+    }
+
+    #[test]
+    fn message_one() {
+        let message = b"8=FIX.4.4\x019=148\x0135=D\x0134=1080\x0149=TESTBUY1\x0152=20180920-18:14:19.508\x0156=TESTSELL1\x0111=636730640278898634\x0115=USD\x0121=2\x0138=7000\x0140=1\x0154=1\x0155=MSFT\x0160=20180920-18:14:19.492\x0110=092\x01\x01\x018=FIX.4.4\x019=75\x0135=A\x0134=1092\x0149=TESTBUY1\x0152=20180920-18:24:59.643\x0156=TESTSELL1\x0198=0\x01108=60\x0110=178\x01";
+        parse_message(message);
+    }
 }

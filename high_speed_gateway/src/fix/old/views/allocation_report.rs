@@ -1,13 +1,13 @@
-use crate::fix::message::FixMessage;
+use crate::fix::message::Message;
 
 pub struct AllocationReportView<'a, const F: usize, const B: usize> {
-    msg: &'a FixMessage<F, B>
+    msg: &'a Message<F, B>
 }
 
 impl<'a, const F: usize, const B: usize> AllocationReportView<'a, F, B> {
     
     #[inline(always)]
-    pub(crate) fn new(msg: &'a FixMessage<F, B>) -> Self {
+    pub(crate) fn new(msg: &'a Message<F, B>) -> Self {
         Self { msg }
     }
 }

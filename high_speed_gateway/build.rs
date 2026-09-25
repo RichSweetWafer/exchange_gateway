@@ -1,0 +1,427 @@
+//! Generates the FIX dictionary tables from specs/fix44.yaml into
+//! $OUT_DIR/fix44.rs, which src/fix/spec.rs includes.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::{env, fs, path::Path};
+
+const SPEC: &str = "specs/fix44.yaml";
+const MAX_TAG: usize = 16_384;
+
+fn main() {
+    println!("cargo:rerun-if-changed={SPEC}");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    let text = fs::read_to_string(SPEC).unwrap_or_else(|e| panic!("{SPEC}: {e}"));
+    let doc = yaml::load(&text).unwrap_or_else(|e| panic!("{SPEC}: {e}"));
+    let dict = Dictionary::from_yaml(&doc).unwrap_or_else(|e| panic!("{SPEC}: {e}"));
+    let code = dict.generate();
+
+    let out = Path::new(&env::var("OUT_DIR").unwrap()).join("fix44.rs");
+    fs::write(&out, code).unwrap();
+}
+
+
+// ---------------------------------------------------------------------------
+// Dictionary model
+// ---------------------------------------------------------------------------
+
+struct FieldDef {
+    tag: u16,
+    name: String,
+    ty: String,
+    /// wire value -> name, in spec order
+    values: Vec<(String, String)>,
+}
+
+enum Item {
+    Field { tag: u16, required: bool },
+    Group { count_tag: u16, required: bool, items: Vec<Item> },
+}
+
+struct MessageDef {
+    name: String,
+    msg_type: String,
+    category: String,
+    items: Vec<Item>,
+}
+
+struct Dictionary {
+    version: String,
+    fields: BTreeMap<u16, FieldDef>,
+    header: Vec<Item>,
+    trailer: Vec<Item>,
+    messages: Vec<MessageDef>,
+    /// Every MsgType the FIX version defines, supported or not.
+    msg_types: Vec<String>,
+}
+
+const TYPES: &[(&str, &str)] = &[
+    ("STRING", "String"), ("CHAR", "Char"), ("INT", "Int"), ("LENGTH", "Length"),
+    ("SEQNUM", "SeqNum"), ("NUMINGROUP", "NumInGroup"), ("BOOLEAN", "Boolean"),
+    ("UTCTIMESTAMP", "UtcTimestamp"), ("DATA", "Data"), ("FLOAT", "Float"),
+    ("PRICE", "Price"), ("QTY", "Qty"), ("AMT", "Amt"), ("CURRENCY", "Currency"),
+    ("EXCHANGE", "Exchange"), ("LOCALMKTDATE", "LocalMktDate"), ("UTCDATEONLY", "UtcDateOnly"),
+    ("UTCTIMEONLY", "UtcTimeOnly"), ("MONTHYEAR", "MonthYear"), ("MULTIPLEVALUESTRING", "MultipleValueString"),
+    ("COUNTRY", "Country"), ("PERCENTAGE", "Percentage"), ("PRICEOFFSET", "PriceOffset"),
+];
+
+impl Dictionary {
+    fn from_yaml(doc: &yaml::Node) -> Result<Self, String> {
+        let version = doc.get("version")?.str()?.to_string();
+
+        let mut fields = BTreeMap::new();
+        let mut by_name = BTreeMap::new();
+        for (key, def) in doc.get("fields")?.map()? {
+            let tag: u16 = key.parse().map_err(|_| format!("field tag `{key}` isn't a number"))?;
+            if tag == 0 || tag as usize >= MAX_TAG {
+                return Err(format!("field tag {tag} out of range"));
+            }
+            let name = def.get("name")?.str()?.to_string();
+            let ty = def.get("type")?.str()?.to_string();
+            if !TYPES.iter().any(|(t, _)| *t == ty) {
+                return Err(format!("field {name}: unknown type {ty}"));
+            }
+            let mut values = Vec::new();
+            if let Some(v) = def.opt("values") {
+                for (wire, value_name) in v.map()? {
+                    values.push((wire.clone(), value_name.str()?.to_string()));
+                }
+            }
+            if by_name.insert(name.clone(), tag).is_some() {
+                return Err(format!("field name {name} defined twice"));
+            }
+            fields.insert(tag, FieldDef { tag, name, ty, values });
+        }
+
+        let items = |node: &yaml::Node, owner: &str| parse_items(node, owner, &fields, &by_name);
+        let header = items(doc.get("header")?, "header")?;
+        let trailer = items(doc.get("trailer")?, "trailer")?;
+
+        let mut messages = Vec::new();
+        for m in doc.get("messages")?.seq()? {
+            let name = m.get("name")?.str()?.to_string();
+            let msg_type = m.get("msgtype")?.str()?.to_string();
+            let category = m.opt("category").map(|c| c.str().map(str::to_string)).transpose()?.unwrap_or("app".into());
+            let items = items(m.get("fields")?, &name)?;
+            messages.push(MessageDef { name, msg_type, category, items });
+        }
+
+        let mut msg_types = Vec::new();
+        for t in doc.get("msgtypes")?.seq()? {
+            let t = t.str()?.to_string();
+            if msg_types.contains(&t) {
+                return Err(format!("msgtypes: {t} listed twice"));
+            }
+            msg_types.push(t);
+        }
+        if let Some(m) = messages.iter().find(|m| !msg_types.contains(&m.msg_type)) {
+            return Err(format!("message {} has MsgType {} missing from msgtypes", m.name, m.msg_type));
+        }
+
+        Ok(Self { version, fields, header, trailer, messages, msg_types })
+    }
+
+    fn generate(&self) -> String {
+        let mut out = String::new();
+        let w = &mut out;
+        writeln!(w, "// @generated by build.rs from {SPEC}. Do not edit.\n").unwrap();
+        writeln!(w, "pub const VERSION: &str = {:?};\n", self.version).unwrap();
+
+        // Tag constants
+        writeln!(w, "/// Tag numbers by field name.\npub mod tags {{").unwrap();
+        for f in self.fields.values() {
+            writeln!(w, "    pub const {}: u16 = {};", screaming(&f.name), f.tag).unwrap();
+        }
+        writeln!(w, "}}\n").unwrap();
+
+        // Enums for fields with values
+        for f in self.fields.values().filter(|f| !f.values.is_empty()) {
+            writeln!(w, "/// {} ({}) values.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {} {{", f.name, f.tag, f.name).unwrap();
+            for (_, n) in &f.values {
+                writeln!(w, "    {},", camel(n)).unwrap();
+            }
+            writeln!(w, "}}\n\nimpl {} {{", f.name).unwrap();
+            writeln!(w, "    pub const TAG: u16 = {};\n", f.tag).unwrap();
+            writeln!(w, "    pub const fn as_bytes(self) -> &'static [u8] {{\n        match self {{").unwrap();
+            for (wire, n) in &f.values {
+                writeln!(w, "            Self::{} => b{:?},", camel(n), wire).unwrap();
+            }
+            writeln!(w, "        }}\n    }}\n").unwrap();
+            writeln!(w, "    pub fn from_bytes(value: &[u8]) -> Option<Self> {{\n        match value {{").unwrap();
+            for (wire, n) in &f.values {
+                writeln!(w, "            b{:?} => Some(Self::{}),", wire, camel(n)).unwrap();
+            }
+            writeln!(w, "            _ => None,\n        }}\n    }}\n}}\n").unwrap();
+        }
+
+        // Field definitions, sorted by tag
+        writeln!(w, "pub static FIELDS: &[FieldDef] = &[").unwrap();
+        for f in self.fields.values() {
+            let ty = TYPES.iter().find(|(t, _)| *t == f.ty).unwrap().1;
+            write!(w, "    FieldDef {{ tag: {}, name: {:?}, ty: FieldType::{}, values: &[", f.tag, f.name, ty).unwrap();
+            for (wire, _) in &f.values {
+                write!(w, "b{:?}, ", wire).unwrap();
+            }
+            writeln!(w, "] }},").unwrap();
+        }
+        writeln!(w, "];\n").unwrap();
+
+        // Header, trailer, messages
+        self.generate_section(w, "HEADER", "StandardHeader", &self.header, None);
+        self.generate_section(w, "TRAILER", "StandardTrailer", &self.trailer, None);
+        for m in &self.messages {
+            self.generate_section(w, &screaming(&m.name), &m.name, &m.items, Some(m));
+        }
+
+        writeln!(w, "/// Message definition by MsgType (35).\npub fn message(msg_type: &[u8]) -> Option<&'static MessageSpec> {{\n    match msg_type {{").unwrap();
+        for m in &self.messages {
+            writeln!(w, "        b{:?} => Some(&{}),", m.msg_type, screaming(&m.name)).unwrap();
+        }
+        writeln!(w, "        _ => None,\n    }}\n}}\n").unwrap();
+
+        writeln!(w, "pub static MESSAGES: &[&MessageSpec] = &[").unwrap();
+        for m in &self.messages {
+            writeln!(w, "    &{},", screaming(&m.name)).unwrap();
+        }
+        writeln!(w, "];\n").unwrap();
+
+        let defined = self.msg_types.iter().map(|t| format!("b{t:?}")).collect::<Vec<_>>().join(" | ");
+        writeln!(w, "/// Whether {} defines `msg_type` (user-defined U... included), whether or not\n/// it's in this dictionary.", self.version).unwrap();
+        writeln!(w, "pub fn is_defined_msg_type(msg_type: &[u8]) -> bool {{\n    matches!(msg_type, {defined} | [b'U', ..])\n}}").unwrap();
+        out
+    }
+
+    /// Writes the GroupSpec statics and the section (or MessageSpec) static.
+    fn generate_section(&self, w: &mut String, ident: &str, name: &str, items: &[Item], msg: Option<&MessageDef>) {
+        let mut groups = Vec::new();
+        self.generate_groups(w, ident, items, &mut groups);
+
+        // Top-level tags only: group members are checked inside their group.
+        let tags: Vec<u16> = items.iter().map(|i| match i {
+            Item::Field { tag, .. } => *tag,
+            Item::Group { count_tag, .. } => *count_tag,
+        }).collect();
+        let required: Vec<u16> = items.iter().filter_map(|i| match i {
+            Item::Field { tag, required: true } | Item::Group { count_tag: tag, required: true, .. } => Some(*tag),
+            _ => None,
+        }).collect();
+
+        let mut set = [0u64; MAX_TAG / 64];
+        for &t in &tags {
+            set[t as usize / 64] |= 1 << (t % 64);
+        }
+        let set_literal = set.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>().join(", ");
+        let groups_literal = groups.iter().map(|g| format!("&{g}")).collect::<Vec<_>>().join(", ");
+
+        match msg {
+            None => {
+                writeln!(w, "/// {name}.\npub static {ident}: SectionSpec = SectionSpec {{").unwrap();
+            }
+            Some(m) => {
+                writeln!(w, "/// {} ({}).\npub static {ident}: MessageSpec = MessageSpec {{", m.name, m.msg_type).unwrap();
+                writeln!(w, "    name: {:?},\n    msg_type: b{:?},\n    admin: {},", m.name, m.msg_type, m.category == "admin").unwrap();
+            }
+        }
+        writeln!(w, "    tags: TagSet([{set_literal}]),").unwrap();
+        writeln!(w, "    required: &{required:?},").unwrap();
+        writeln!(w, "    groups: &[{groups_literal}],\n}};\n").unwrap();
+    }
+
+    /// GroupSpec statics for every group in `items`, nested ones included.
+    /// Top-level group idents are pushed to `top`.
+    fn generate_groups(&self, w: &mut String, prefix: &str, items: &[Item], top: &mut Vec<String>) {
+        for item in items {
+            let Item::Group { count_tag, items: inner, .. } = item else { continue };
+            let gname = &self.fields[count_tag].name;
+            let ident = format!("{prefix}_{}", screaming(gname));
+            let mut nested = Vec::new();
+            self.generate_groups(w, &ident, inner, &mut nested);
+
+            let mut members = Vec::new();
+            collect_tags(inner, &mut members);
+            let delimiter = match &inner[0] {
+                Item::Field { tag, .. } => *tag,
+                Item::Group { count_tag, .. } => *count_tag,
+            };
+            let req: Vec<u16> = inner.iter().filter_map(|i| match i {
+                Item::Field { tag, required: true } | Item::Group { count_tag: tag, required: true, .. } => Some(*tag),
+                _ => None,
+            }).collect();
+            let nested_literal = nested.iter().map(|g| format!("&{g}")).collect::<Vec<_>>().join(", ");
+            writeln!(w, "/// {gname} ({count_tag}) in {prefix}.\npub static {ident}: GroupSpec = GroupSpec {{").unwrap();
+            let base = *members.iter().min().unwrap();
+            let mut bits = vec![0u64; (*members.iter().max().unwrap() - base) as usize / 64 + 1];
+            for &t in &members {
+                let bit = (t - base) as usize;
+                bits[bit / 64] |= 1 << (bit % 64);
+            }
+            let bits_literal = bits.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>().join(", ");
+            writeln!(w, "    count_tag: {count_tag},\n    delimiter: {delimiter},\n    members: &{members:?},").unwrap();
+            writeln!(w, "    member_set: TagRange {{ base: {base}, bits: &[{bits_literal}] }},").unwrap();
+            writeln!(w, "    required: &{req:?},\n    groups: &[{nested_literal}],\n}};\n").unwrap();
+            top.push(ident);
+        }
+    }
+}
+
+fn parse_items(node: &yaml::Node, owner: &str, fields: &BTreeMap<u16, FieldDef>, by_name: &BTreeMap<String, u16>) -> Result<Vec<Item>, String> {
+    let lookup = |name: &str| by_name.get(name).copied().ok_or_else(|| format!("{owner}: unknown field {name}"));
+    let mut items = Vec::new();
+    for entry in node.seq()? {
+        let required = match entry.opt("required") {
+            None => false,
+            Some(v) => match v.str()? {
+                "true" => true,
+                "false" => false,
+                other => return Err(format!("{owner}: required must be true or false, got {other}")),
+            },
+        };
+        if let Some(name) = entry.opt("field") {
+            items.push(Item::Field { tag: lookup(name.str()?)?, required });
+        } else if let Some(name) = entry.opt("group") {
+            let name = name.str()?;
+            let count_tag = lookup(name)?;
+            if fields[&count_tag].ty != "NUMINGROUP" {
+                return Err(format!("{owner}: group {name} isn't a NUMINGROUP field"));
+            }
+            let inner = parse_items(entry.get("fields")?, &format!("{owner}/{name}"), fields, by_name)?;
+            if inner.is_empty() {
+                return Err(format!("{owner}: group {name} has no fields"));
+            }
+            items.push(Item::Group { count_tag, required, items: inner });
+        } else {
+            return Err(format!("{owner}: item needs `field` or `group`"));
+        }
+    }
+    Ok(items)
+}
+
+fn collect_tags(items: &[Item], out: &mut Vec<u16>) {
+    for item in items {
+        match item {
+            Item::Field { tag, .. } => out.push(*tag),
+            Item::Group { count_tag, items, .. } => {
+                out.push(*count_tag);
+                collect_tags(items, out);
+            }
+        }
+    }
+}
+
+/// BeginString -> BEGIN_STRING, SenderCompID -> SENDER_COMP_ID,
+/// NoPartyIDs -> NO_PARTY_IDS.
+fn screaming(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            let prev = chars[i - 1];
+            // A plural "s" after an acronym (IDs) isn't a new word.
+            let plural = chars.get(i + 1) == Some(&'s') && chars.get(i + 2).is_none_or(|n| n.is_ascii_uppercase());
+            let next_lower = !plural && chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+            if prev.is_ascii_lowercase() || prev.is_ascii_digit() || (prev.is_ascii_uppercase() && next_lower) {
+                out.push('_');
+            }
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
+
+/// TEST_REQUEST -> TestRequest.
+fn camel(name: &str) -> String {
+    name.split('_')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut s = p.to_ascii_lowercase();
+            s[..1].make_ascii_uppercase();
+            s
+        })
+        .collect()
+}
+
+
+// ---------------------------------------------------------------------------
+// YAML access (yaml-rust2, converted to a small tree with string scalars)
+// ---------------------------------------------------------------------------
+
+mod yaml {
+    use yaml_rust2::{Yaml, YamlLoader};
+
+    #[derive(Debug)]
+    pub enum Node {
+        Scalar(String),
+        Map(Vec<(String, Node)>),
+        Seq(Vec<Node>),
+    }
+
+    pub fn load(src: &str) -> Result<Node, String> {
+        let mut docs = YamlLoader::load_from_str(src).map_err(|e| e.to_string())?;
+        match docs.len() {
+            1 => convert(docs.remove(0)),
+            n => Err(format!("expected one YAML document, found {n}")),
+        }
+    }
+
+    /// Keys and scalars become strings: `7:` and `"7":` are the same key,
+    /// `required: true` reads as "true".
+    fn convert(y: Yaml) -> Result<Node, String> {
+        Ok(match y {
+            Yaml::String(s) | Yaml::Real(s) => Node::Scalar(s),
+            Yaml::Integer(i) => Node::Scalar(i.to_string()),
+            Yaml::Boolean(b) => Node::Scalar(b.to_string()),
+            Yaml::Null => Node::Scalar(String::new()),
+            Yaml::Array(items) => Node::Seq(items.into_iter().map(convert).collect::<Result<_, _>>()?),
+            Yaml::Hash(map) => {
+                let mut entries: Vec<(String, Node)> = Vec::new();
+                for (k, v) in map {
+                    let Node::Scalar(key) = convert(k)? else { return Err("mapping keys must be scalars".into()) };
+                    if entries.iter().any(|(e, _)| *e == key) {
+                        return Err(format!("duplicate key `{key}`"));
+                    }
+                    entries.push((key, convert(v)?));
+                }
+                Node::Map(entries)
+            }
+            Yaml::Alias(_) => return Err("aliases aren't supported".into()),
+            Yaml::BadValue => return Err("invalid YAML value".into()),
+        })
+    }
+
+    impl Node {
+        pub fn str(&self) -> Result<&str, String> {
+            match self {
+                Node::Scalar(s) => Ok(s),
+                other => Err(format!("expected a scalar, got {other:?}")),
+            }
+        }
+
+        pub fn map(&self) -> Result<&[(String, Node)], String> {
+            match self {
+                Node::Map(m) => Ok(m),
+                other => Err(format!("expected a mapping, got {other:?}")),
+            }
+        }
+
+        pub fn seq(&self) -> Result<&[Node], String> {
+            match self {
+                Node::Seq(s) => Ok(s),
+                // `key:` with nothing under it
+                Node::Scalar(s) if s.is_empty() => Ok(&[]),
+                other => Err(format!("expected a sequence, got {other:?}")),
+            }
+        }
+
+        pub fn opt(&self, key: &str) -> Option<&Node> {
+            match self {
+                Node::Map(m) => m.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+                _ => None,
+            }
+        }
+
+        pub fn get(&self, key: &str) -> Result<&Node, String> {
+            self.opt(key).ok_or_else(|| format!("missing key `{key}`"))
+        }
+    }
+}

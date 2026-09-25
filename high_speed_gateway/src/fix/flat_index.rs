@@ -145,6 +145,57 @@ impl<const N: usize> FlatIndex<N> {
 
 
 
+/// Borrows the index for one message. `len` stays in a register while fields
+/// are pushed and is written back once, on drop, so early returns still leave
+/// the fields pushed so far in place.
+pub struct Writer<'a, const N: usize> {
+    first: &'a mut [u16; MAX_TAG],
+    tape: &'a mut [Field; N],
+    out_len: &'a mut u16,
+    len: usize,
+}
+
+impl<const N: usize> FlatIndex<N> {
+    /// Starts a new message: clears the index and hands out a writer.
+    #[inline(always)]
+    pub fn writer(&mut self) -> Writer<'_, N> {
+        self.len = 0;
+        Writer { first: &mut self.first, tape: &mut self.tape, out_len: &mut self.len, len: 0 }
+    }
+}
+
+impl<const N: usize> Writer<'_, N> {
+    /// Same as `FlatIndex::push`.
+    #[inline(always)]
+    pub fn push(&mut self, tag: u16, offset: u32, length: u16) -> Result<(), PushError> {
+        let tag_idx = tag as usize;
+        let len = self.len;
+        if tag_idx >= MAX_TAG {
+            return Err(PushError::TagOutOfRange);
+        }
+        if len >= N {
+            return Err(PushError::Full);
+        }
+        // p < len < N, so neither index can panic.
+        let p = self.first[tag_idx] as usize;
+        if !(p < len && self.tape[p].tag == tag) {
+            self.first[tag_idx] = len as u16;
+        }
+        self.tape[len] = Field { offset, length, tag };
+        self.len = len + 1;
+        Ok(())
+    }
+}
+
+impl<const N: usize> Drop for Writer<'_, N> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        *self.out_len = self.len as u16;
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +335,36 @@ mod tests {
         ix.push(34, 0, 1).unwrap();
         assert_eq!(ix.push(49, 0, 1), Err(PushError::Full));
         assert_eq!(ix.len(), 2);
+    }
+
+    #[test]
+    fn writer_commits_on_drop() {
+        let mut ix = index();
+        push_all(&mut ix, "35=D|34=1|58=old|");
+        {
+            let mut w = ix.writer();
+            w.push(35, 3, 1).unwrap();
+            w.push(55, 8, 4).unwrap();
+            w.push(55, 15, 4).unwrap();
+        }
+        assert_eq!(ix.len(), 3);
+        assert_eq!(ix.position(55), Some(1));
+        assert_eq!(ix.get(58), None);
+        let tags: Vec<u16> = ix.tape().iter().map(|f| f.tag).collect();
+        assert_eq!(tags, [35, 55, 55]);
+    }
+
+    #[test]
+    fn writer_errors_keep_pushed_fields() {
+        let mut ix = Box::new(FlatIndex::<2>::new());
+        {
+            let mut w = ix.writer();
+            w.push(35, 0, 1).unwrap();
+            assert_eq!(w.push(u16::MAX, 0, 1), Err(PushError::TagOutOfRange));
+            w.push(34, 0, 1).unwrap();
+            assert_eq!(w.push(49, 0, 1), Err(PushError::Full));
+        }
+        assert_eq!(ix.len(), 2);
+        assert_eq!(ix.position(34), Some(1));
     }
 }

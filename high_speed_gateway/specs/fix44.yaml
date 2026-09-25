@@ -1,0 +1,598 @@
+# FIX 4.4 dictionary: StandardHeader, StandardTrailer, the admin messages
+# 0, 1, 2, 3, 4, 5, A and the order-flow application messages D, F, G, 8, 9, j.
+# Application messages carry a subset of their FIX 4.4 fields (Instrument is
+# Symbol / SecurityID / SecurityIDSource / SecurityExchange, OrderQtyData is
+# OrderQty); more get added as they're needed.
+#
+# Read by build.rs into static tables (tag constants, enums, per-MsgType
+# allowed/required tags, GroupSpec statics). Plain block YAML, no anchors.
+#
+# fields:   tag -> name, type, optional enum values (wire value -> name)
+# header / trailer / messages[].fields: ordered list of
+#   - field: <name>            required: true|false (default false)
+#   - group: <NumInGroup name> fields: [...]   (first field is the delimiter)
+# msgtypes: every MsgType FIX 4.4 defines. One without a `messages` entry is
+#   answered with BusinessMessageReject 380=3 (Unsupported Message Type); a
+#   value outside this list (and not user defined, U...) with Reject 373=11.
+
+version: FIX.4.4
+
+msgtypes: [
+  "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+  "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P", "Q", "R", "S", "T", "V", "W", "X", "Y", "Z",
+  "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+  "AA", "AB", "AC", "AD", "AE", "AF", "AG", "AH", "AI", "AJ", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT",
+  "AU", "AV", "AW", "AX", "AY", "AZ",
+  "BA", "BB", "BC", "BD", "BE", "BF", "BG", "BH",
+  ]
+
+fields:
+  1:   { name: Account, type: STRING }
+  6:   { name: AvgPx, type: PRICE }
+  7:   { name: BeginSeqNo, type: SEQNUM }
+  8:   { name: BeginString, type: STRING }
+  9:   { name: BodyLength, type: LENGTH }
+  10:  { name: CheckSum, type: STRING }
+  11:  { name: ClOrdID, type: STRING }
+  14:  { name: CumQty, type: QTY }
+  15:  { name: Currency, type: CURRENCY }
+  16:  { name: EndSeqNo, type: SEQNUM }
+  17:  { name: ExecID, type: STRING }
+  18:  { name: ExecInst, type: MULTIPLEVALUESTRING }
+  21:
+    name: HandlInst
+    type: CHAR
+    values:
+      "1": AUTOMATED_PRIVATE
+      "2": AUTOMATED_PUBLIC
+      "3": MANUAL
+  22:  { name: SecurityIDSource, type: STRING }
+  31:  { name: LastPx, type: PRICE }
+  32:  { name: LastQty, type: QTY }
+  34:  { name: MsgSeqNum, type: SEQNUM }
+  35:
+    name: MsgType
+    type: STRING
+    values:
+      "0": HEARTBEAT
+      "1": TEST_REQUEST
+      "2": RESEND_REQUEST
+      "3": REJECT
+      "4": SEQUENCE_RESET
+      "5": LOGOUT
+      "A": LOGON
+      "D": NEW_ORDER_SINGLE
+      "F": ORDER_CANCEL_REQUEST
+      "G": ORDER_CANCEL_REPLACE_REQUEST
+      "8": EXECUTION_REPORT
+      "9": ORDER_CANCEL_REJECT
+      "j": BUSINESS_MESSAGE_REJECT
+  36:  { name: NewSeqNo, type: SEQNUM }
+  37:  { name: OrderID, type: STRING }
+  38:  { name: OrderQty, type: QTY }
+  39:
+    name: OrdStatus
+    type: CHAR
+    values:
+      "0": NEW
+      "1": PARTIALLY_FILLED
+      "2": FILLED
+      "3": DONE_FOR_DAY
+      "4": CANCELED
+      "5": REPLACED
+      "6": PENDING_CANCEL
+      "7": STOPPED
+      "8": REJECTED
+      "9": SUSPENDED
+      "A": PENDING_NEW
+      "B": CALCULATED
+      "C": EXPIRED
+      "D": ACCEPTED_FOR_BIDDING
+      "E": PENDING_REPLACE
+  40:
+    name: OrdType
+    type: CHAR
+    values:
+      "1": MARKET
+      "2": LIMIT
+      "3": STOP
+      "4": STOP_LIMIT
+      "6": WITH_OR_WITHOUT
+      "7": LIMIT_OR_BETTER
+      "8": LIMIT_WITH_OR_WITHOUT
+      "9": ON_BASIS
+      "D": PREVIOUSLY_QUOTED
+      "E": PREVIOUSLY_INDICATED
+      "G": FOREX_SWAP
+      "I": FUNARI
+      "J": MARKET_IF_TOUCHED
+      "K": MARKET_WITH_LEFTOVER_AS_LIMIT
+      "L": PREVIOUS_FUND_VALUATION_POINT
+      "M": NEXT_FUND_VALUATION_POINT
+      "P": PEGGED
+  41:  { name: OrigClOrdID, type: STRING }
+  43:  { name: PossDupFlag, type: BOOLEAN }
+  44:  { name: Price, type: PRICE }
+  45:  { name: RefSeqNum, type: SEQNUM }
+  48:  { name: SecurityID, type: STRING }
+  49:  { name: SenderCompID, type: STRING }
+  50:  { name: SenderSubID, type: STRING }
+  52:  { name: SendingTime, type: UTCTIMESTAMP }
+  54:
+    name: Side
+    type: CHAR
+    values:
+      "1": BUY
+      "2": SELL
+      "3": BUY_MINUS
+      "4": SELL_PLUS
+      "5": SELL_SHORT
+      "6": SELL_SHORT_EXEMPT
+      "7": UNDISCLOSED
+      "8": CROSS
+      "9": CROSS_SHORT
+      "A": CROSS_SHORT_EXEMPT
+      "B": AS_DEFINED
+      "C": OPPOSITE
+      "D": SUBSCRIBE
+      "E": REDEEM
+      "F": LEND
+      "G": BORROW
+  55:  { name: Symbol, type: STRING }
+  56:  { name: TargetCompID, type: STRING }
+  57:  { name: TargetSubID, type: STRING }
+  58:  { name: Text, type: STRING }
+  59:
+    name: TimeInForce
+    type: CHAR
+    values:
+      "0": DAY
+      "1": GOOD_TILL_CANCEL
+      "2": AT_THE_OPENING
+      "3": IMMEDIATE_OR_CANCEL
+      "4": FILL_OR_KILL
+      "5": GOOD_TILL_CROSSING
+      "6": GOOD_TILL_DATE
+      "7": AT_THE_CLOSE
+  60:  { name: TransactTime, type: UTCTIMESTAMP }
+  89:  { name: Signature, type: DATA }
+  90:  { name: SecureDataLen, type: LENGTH }
+  91:  { name: SecureData, type: DATA }
+  93:  { name: SignatureLength, type: LENGTH }
+  95:  { name: RawDataLength, type: LENGTH }
+  96:  { name: RawData, type: DATA }
+  97:  { name: PossResend, type: BOOLEAN }
+  98:
+    name: EncryptMethod
+    type: INT
+    values:
+      "0": NONE_OTHER
+      "1": PKCS
+      "2": DES
+      "3": PKCS_DES
+      "4": PGP_DES
+      "5": PGP_DES_MD5
+      "6": PEM_DES_MD5
+  99:  { name: StopPx, type: PRICE }
+  102:
+    name: CxlRejReason
+    type: INT
+    values:
+      "0": TOO_LATE_TO_CANCEL
+      "1": UNKNOWN_ORDER
+      "2": BROKER_OPTION
+      "3": ORDER_ALREADY_IN_PENDING_STATUS
+      "4": UNABLE_TO_PROCESS_ORDER_MASS_CANCEL_REQUEST
+      "5": ORIG_ORD_MOD_TIME_MISMATCH
+      "6": DUPLICATE_CL_ORD_ID
+      "99": OTHER
+  103:
+    name: OrdRejReason
+    type: INT
+    values:
+      "0": BROKER_OPTION
+      "1": UNKNOWN_SYMBOL
+      "2": EXCHANGE_CLOSED
+      "3": ORDER_EXCEEDS_LIMIT
+      "4": TOO_LATE_TO_ENTER
+      "5": UNKNOWN_ORDER
+      "6": DUPLICATE_ORDER
+      "7": DUPLICATE_OF_A_VERBALLY_COMMUNICATED_ORDER
+      "8": STALE_ORDER
+      "9": TRADE_ALONG_REQUIRED
+      "10": INVALID_INVESTOR_ID
+      "11": UNSUPPORTED_ORDER_CHARACTERISTIC
+      "12": SURVEILLENCE_OPTION
+      "13": INCORRECT_QUANTITY
+      "14": INCORRECT_ALLOCATED_QUANTITY
+      "15": UNKNOWN_ACCOUNT
+      "18": INVALID_PRICE_INCREMENT
+      "99": OTHER
+  108: { name: HeartBtInt, type: INT }
+  110: { name: MinQty, type: QTY }
+  111: { name: MaxFloor, type: QTY }
+  112: { name: TestReqID, type: STRING }
+  115: { name: OnBehalfOfCompID, type: STRING }
+  116: { name: OnBehalfOfSubID, type: STRING }
+  122: { name: OrigSendingTime, type: UTCTIMESTAMP }
+  123: { name: GapFillFlag, type: BOOLEAN }
+  126: { name: ExpireTime, type: UTCTIMESTAMP }
+  128: { name: DeliverToCompID, type: STRING }
+  129: { name: DeliverToSubID, type: STRING }
+  141: { name: ResetSeqNumFlag, type: BOOLEAN }
+  142: { name: SenderLocationID, type: STRING }
+  143: { name: TargetLocationID, type: STRING }
+  144: { name: OnBehalfOfLocationID, type: STRING }
+  145: { name: DeliverToLocationID, type: STRING }
+  150:
+    name: ExecType
+    type: CHAR
+    values:
+      "0": NEW
+      "3": DONE_FOR_DAY
+      "4": CANCELED
+      "5": REPLACED
+      "6": PENDING_CANCEL
+      "7": STOPPED
+      "8": REJECTED
+      "9": SUSPENDED
+      "A": PENDING_NEW
+      "B": CALCULATED
+      "C": EXPIRED
+      "D": RESTATED
+      "E": PENDING_REPLACE
+      "F": TRADE
+      "G": TRADE_CORRECT
+      "H": TRADE_CANCEL
+      "I": ORDER_STATUS
+  151: { name: LeavesQty, type: QTY }
+  207: { name: SecurityExchange, type: EXCHANGE }
+  212: { name: XmlDataLen, type: LENGTH }
+  213: { name: XmlData, type: DATA }
+  347: { name: MessageEncoding, type: STRING }
+  354: { name: EncodedTextLen, type: LENGTH }
+  355: { name: EncodedText, type: DATA }
+  369: { name: LastMsgSeqNumProcessed, type: SEQNUM }
+  371: { name: RefTagID, type: INT }
+  372: { name: RefMsgType, type: STRING }
+  373:
+    name: SessionRejectReason
+    type: INT
+    values:
+      "0": INVALID_TAG_NUMBER
+      "1": REQUIRED_TAG_MISSING
+      "2": TAG_NOT_DEFINED_FOR_THIS_MESSAGE_TYPE
+      "3": UNDEFINED_TAG
+      "4": TAG_SPECIFIED_WITHOUT_A_VALUE
+      "5": VALUE_IS_INCORRECT
+      "6": INCORRECT_DATA_FORMAT_FOR_VALUE
+      "7": DECRYPTION_PROBLEM
+      "8": SIGNATURE_PROBLEM
+      "9": COMP_ID_PROBLEM
+      "10": SENDING_TIME_ACCURACY_PROBLEM
+      "11": INVALID_MSG_TYPE
+      "12": XML_VALIDATION_ERROR
+      "13": TAG_APPEARS_MORE_THAN_ONCE
+      "14": TAG_SPECIFIED_OUT_OF_REQUIRED_ORDER
+      "15": REPEATING_GROUP_FIELDS_OUT_OF_ORDER
+      "16": INCORRECT_NUM_IN_GROUP_COUNT_FOR_REPEATING_GROUP
+      "17": NON_DATA_VALUE_INCLUDES_FIELD_DELIMITER
+      "99": OTHER
+  379: { name: BusinessRejectRefID, type: STRING }
+  380:
+    name: BusinessRejectReason
+    type: INT
+    values:
+      "0": OTHER
+      "1": UNKNOWN_ID
+      "2": UNKNOWN_SECURITY
+      "3": UNSUPPORTED_MESSAGE_TYPE
+      "4": APPLICATION_NOT_AVAILABLE
+      "5": CONDITIONALLY_REQUIRED_FIELD_MISSING
+      "6": NOT_AUTHORIZED
+      "7": DELIVER_TO_FIRM_NOT_AVAILABLE_AT_THIS_TIME
+      "18": INVALID_PRICE_INCREMENT
+  383: { name: MaxMessageSize, type: LENGTH }
+  384: { name: NoMsgTypes, type: NUMINGROUP }
+  385:
+    name: MsgDirection
+    type: CHAR
+    values:
+      "S": SEND
+      "R": RECEIVE
+  432: { name: ExpireDate, type: LOCALMKTDATE }
+  434:
+    name: CxlRejResponseTo
+    type: CHAR
+    values:
+      "1": ORDER_CANCEL_REQUEST
+      "2": ORDER_CANCEL_REPLACE_REQUEST
+  # PartyIDSource and PartyRole have long, growing value lists; any value passes.
+  447: { name: PartyIDSource, type: CHAR }
+  448: { name: PartyID, type: STRING }
+  452: { name: PartyRole, type: INT }
+  453: { name: NoPartyIDs, type: NUMINGROUP }
+  464: { name: TestMessageIndicator, type: BOOLEAN }
+  523: { name: PartySubID, type: STRING }
+  553: { name: Username, type: STRING }
+  554: { name: Password, type: STRING }
+  627: { name: NoHops, type: NUMINGROUP }
+  628: { name: HopCompID, type: STRING }
+  629: { name: HopSendingTime, type: UTCTIMESTAMP }
+  630: { name: HopRefID, type: SEQNUM }
+  789: { name: NextExpectedMsgSeqNum, type: SEQNUM }
+  802: { name: NoPartySubIDs, type: NUMINGROUP }
+  803: { name: PartySubIDType, type: INT }
+
+# 8, 9 and 35 must be the first three fields; the parser already enforces that.
+header:
+  - { field: BeginString, required: true }
+  - { field: BodyLength, required: true }
+  - { field: MsgType, required: true }
+  - { field: SenderCompID, required: true }
+  - { field: TargetCompID, required: true }
+  - { field: OnBehalfOfCompID }
+  - { field: DeliverToCompID }
+  - { field: SecureDataLen }
+  - { field: SecureData }
+  - { field: MsgSeqNum, required: true }
+  - { field: SenderSubID }
+  - { field: SenderLocationID }
+  - { field: TargetSubID }
+  - { field: TargetLocationID }
+  - { field: OnBehalfOfSubID }
+  - { field: OnBehalfOfLocationID }
+  - { field: DeliverToSubID }
+  - { field: DeliverToLocationID }
+  - { field: PossDupFlag }
+  - { field: PossResend }
+  - { field: SendingTime, required: true }
+  - { field: OrigSendingTime }
+  - { field: XmlDataLen }
+  - { field: XmlData }
+  - { field: MessageEncoding }
+  - { field: LastMsgSeqNumProcessed }
+  - group: NoHops
+    fields:
+      - { field: HopCompID }
+      - { field: HopSendingTime }
+      - { field: HopRefID }
+
+trailer:
+  - { field: SignatureLength }
+  - { field: Signature }
+  - { field: CheckSum, required: true }
+
+messages:
+  - name: Heartbeat
+    msgtype: "0"
+    category: admin
+    fields:
+      - { field: TestReqID }
+
+  - name: TestRequest
+    msgtype: "1"
+    category: admin
+    fields:
+      - { field: TestReqID, required: true }
+
+  - name: ResendRequest
+    msgtype: "2"
+    category: admin
+    fields:
+      - { field: BeginSeqNo, required: true }
+      - { field: EndSeqNo, required: true }
+
+  - name: Reject
+    msgtype: "3"
+    category: admin
+    fields:
+      - { field: RefSeqNum, required: true }
+      - { field: RefTagID }
+      - { field: RefMsgType }
+      - { field: SessionRejectReason }
+      - { field: Text }
+      - { field: EncodedTextLen }
+      - { field: EncodedText }
+
+  - name: SequenceReset
+    msgtype: "4"
+    category: admin
+    fields:
+      - { field: GapFillFlag }
+      - { field: NewSeqNo, required: true }
+
+  - name: Logout
+    msgtype: "5"
+    category: admin
+    fields:
+      - { field: Text }
+      - { field: EncodedTextLen }
+      - { field: EncodedText }
+
+  - name: Logon
+    msgtype: "A"
+    category: admin
+    fields:
+      - { field: EncryptMethod, required: true }
+      - { field: HeartBtInt, required: true }
+      - { field: RawDataLength }
+      - { field: RawData }
+      - { field: ResetSeqNumFlag }
+      - { field: NextExpectedMsgSeqNum }
+      - { field: MaxMessageSize }
+      - group: NoMsgTypes
+        fields:
+          - { field: RefMsgType }
+          - { field: MsgDirection }
+      - { field: TestMessageIndicator }
+      - { field: Username }
+      - { field: Password }
+
+  # Application messages. Conditionally required fields (Price for limit
+  # orders, LastQty / LastPx on fills, ...) are checked by the views in app.rs
+  # and answered with a BusinessMessageReject.
+
+  - name: NewOrderSingle
+    msgtype: "D"
+    category: app
+    fields:
+      - { field: ClOrdID, required: true }
+      - group: NoPartyIDs
+        fields:
+          - { field: PartyID }
+          - { field: PartyIDSource }
+          - { field: PartyRole }
+          - group: NoPartySubIDs
+            fields:
+              - { field: PartySubID }
+              - { field: PartySubIDType }
+      - { field: Account }
+      - { field: HandlInst }
+      - { field: ExecInst }
+      - { field: MinQty }
+      - { field: MaxFloor }
+      - { field: Symbol, required: true }
+      - { field: SecurityID }
+      - { field: SecurityIDSource }
+      - { field: SecurityExchange }
+      - { field: Side, required: true }
+      - { field: TransactTime, required: true }
+      - { field: OrderQty, required: true }
+      - { field: OrdType, required: true }
+      - { field: Price }
+      - { field: StopPx }
+      - { field: Currency }
+      - { field: TimeInForce }
+      - { field: ExpireDate }
+      - { field: ExpireTime }
+      - { field: Text }
+
+  - name: OrderCancelRequest
+    msgtype: "F"
+    category: app
+    fields:
+      - { field: OrigClOrdID, required: true }
+      - { field: OrderID }
+      - { field: ClOrdID, required: true }
+      - { field: Account }
+      - group: NoPartyIDs
+        fields:
+          - { field: PartyID }
+          - { field: PartyIDSource }
+          - { field: PartyRole }
+          - group: NoPartySubIDs
+            fields:
+              - { field: PartySubID }
+              - { field: PartySubIDType }
+      - { field: Symbol, required: true }
+      - { field: SecurityID }
+      - { field: SecurityIDSource }
+      - { field: SecurityExchange }
+      - { field: Side, required: true }
+      - { field: TransactTime, required: true }
+      - { field: OrderQty }
+      - { field: Text }
+
+  - name: OrderCancelReplaceRequest
+    msgtype: "G"
+    category: app
+    fields:
+      - { field: OrderID }
+      - group: NoPartyIDs
+        fields:
+          - { field: PartyID }
+          - { field: PartyIDSource }
+          - { field: PartyRole }
+          - group: NoPartySubIDs
+            fields:
+              - { field: PartySubID }
+              - { field: PartySubIDType }
+      - { field: OrigClOrdID, required: true }
+      - { field: ClOrdID, required: true }
+      - { field: Account }
+      - { field: HandlInst }
+      - { field: ExecInst }
+      - { field: MinQty }
+      - { field: MaxFloor }
+      - { field: Symbol, required: true }
+      - { field: SecurityID }
+      - { field: SecurityIDSource }
+      - { field: SecurityExchange }
+      - { field: Side, required: true }
+      - { field: TransactTime, required: true }
+      - { field: OrderQty, required: true }
+      - { field: OrdType, required: true }
+      - { field: Price }
+      - { field: StopPx }
+      - { field: Currency }
+      - { field: TimeInForce }
+      - { field: ExpireDate }
+      - { field: ExpireTime }
+      - { field: Text }
+
+  - name: ExecutionReport
+    msgtype: "8"
+    category: app
+    fields:
+      - { field: OrderID, required: true }
+      - { field: ClOrdID }
+      - { field: OrigClOrdID }
+      - group: NoPartyIDs
+        fields:
+          - { field: PartyID }
+          - { field: PartyIDSource }
+          - { field: PartyRole }
+          - group: NoPartySubIDs
+            fields:
+              - { field: PartySubID }
+              - { field: PartySubIDType }
+      - { field: ExecID, required: true }
+      - { field: ExecType, required: true }
+      - { field: OrdStatus, required: true }
+      - { field: OrdRejReason }
+      - { field: Account }
+      - { field: Symbol, required: true }
+      - { field: SecurityID }
+      - { field: SecurityIDSource }
+      - { field: SecurityExchange }
+      - { field: Side, required: true }
+      - { field: OrderQty }
+      - { field: OrdType }
+      - { field: Price }
+      - { field: StopPx }
+      - { field: Currency }
+      - { field: TimeInForce }
+      - { field: LastQty }
+      - { field: LastPx }
+      - { field: LeavesQty, required: true }
+      - { field: CumQty, required: true }
+      - { field: AvgPx, required: true }
+      - { field: TransactTime }
+      - { field: Text }
+
+  - name: OrderCancelReject
+    msgtype: "9"
+    category: app
+    fields:
+      - { field: OrderID, required: true }
+      - { field: ClOrdID, required: true }
+      - { field: OrigClOrdID, required: true }
+      - { field: OrdStatus, required: true }
+      - { field: Account }
+      - { field: TransactTime }
+      - { field: CxlRejResponseTo, required: true }
+      - { field: CxlRejReason }
+      - { field: Text }
+
+  - name: BusinessMessageReject
+    msgtype: "j"
+    category: app
+    fields:
+      - { field: RefSeqNum }
+      - { field: RefMsgType, required: true }
+      - { field: BusinessRejectRefID }
+      - { field: BusinessRejectReason, required: true }
+      - { field: Text }
+      - { field: EncodedTextLen }
+      - { field: EncodedText }

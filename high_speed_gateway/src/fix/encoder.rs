@@ -12,7 +12,7 @@ const SOH: u8 = 0x01;
 /// Room for "8=FIX.x.y|9=" + up to 7 BodyLength digits + SOH.
 const PREFIX_ROOM: usize = 32;
 /// "10=" + 3 digits + SOH.
-const TRAILER_LEN: usize = 7;
+pub const TRAILER_LEN: usize = 7;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum EncodeError {
@@ -108,6 +108,19 @@ impl<'a> MessageWriter<'a> {
             p += 1;
         }
         self.bytes(tag, &text[..p])
+    }
+
+    /// Copies already encoded fields ("tag=value|..."), e.g. a stored message's
+    /// body on resend. The caller vouches for their format.
+    pub fn raw_fields(&mut self, fields: &[u8]) -> Result<&mut Self, EncodeError> {
+        debug_assert!(fields.last().is_none_or(|&b| b == SOH), "fields end with SOH");
+        self.raw(fields)?;
+        Ok(self)
+    }
+
+    /// Body bytes written so far (35= onwards).
+    pub fn body_len(&self) -> usize {
+        self.pos - PREFIX_ROOM
     }
 
     pub fn bool(&mut self, tag: u16, value: bool) -> Result<&mut Self, EncodeError> {

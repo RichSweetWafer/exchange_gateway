@@ -245,18 +245,24 @@ fn check_value(raw: &[u8], field: &super::flat_index::Field) -> Result<(), (Sess
     let start = field.offset as usize;
     let v = &raw[start..start + field.length as usize];
 
+    let decimal = matches!(def.ty, FieldType::Float | FieldType::Price | FieldType::Qty | FieldType::Amt
+        | FieldType::Percentage | FieldType::PriceOffset);
     let well_formed = match def.ty {
         FieldType::Int => is_int(v),
         FieldType::Length | FieldType::SeqNum | FieldType::NumInGroup => v.iter().all(u8::is_ascii_digit),
         FieldType::Boolean => v == b"Y" || v == b"N",
         FieldType::Char => v.len() == 1,
         FieldType::UtcTimestamp => parse_utc_timestamp(v).is_some(),
-        FieldType::Float | FieldType::Price | FieldType::Qty | FieldType::Amt
-            | FieldType::Percentage | FieldType::PriceOffset => is_decimal(v),
+        _ if decimal => is_decimal(v),
         _ => true,
     };
     if !well_formed {
         return Err((SessionRejectReason::IncorrectDataFormatForValue, "Incorrect data format for value"))
+    }
+    // Well formed but past the i64 mantissa. Checked here so the lazy
+    // application views can read decimals without a range check.
+    if decimal && decode::to_decimal(v).is_none() {
+        return Err((SessionRejectReason::ValueIsIncorrect, "Value is incorrect (out of range) for this tag"))
     }
     if !def.values.is_empty() && !def.values.contains(&v) {
         return Err((SessionRejectReason::ValueIsIncorrect, "Value is incorrect (out of range) for this tag"))
@@ -549,5 +555,7 @@ mod tests {
         assert_eq!(body_err(&frame("4", "", "123=X|36=10|")), (Some(123), SessionRejectReason::IncorrectDataFormatForValue));
         assert_eq!(body_err(&frame("A", "", "98=0|108=30|384=1|372=D|385=SR|")), (Some(385), SessionRejectReason::IncorrectDataFormatForValue));
         assert_eq!(body_err(&frame("A", "", "98=0|108=30|384=1|372=D|385=X|")), (Some(385), SessionRejectReason::ValueIsIncorrect));
+        // Decimal well formed but past i64.
+        assert_eq!(body_err(&frame("D", "", "11=x|55=MSFT|54=1|60=20261025-17:00:00|38=99999999999999999999|40=1|")), (Some(38), SessionRejectReason::ValueIsIncorrect));
     }
 }

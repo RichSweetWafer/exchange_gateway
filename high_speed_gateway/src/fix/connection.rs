@@ -14,6 +14,7 @@ use super::framer::{Framer, FramerResult};
 use super::parser::Parser;
 use super::recv_buffer::RecvBuffer;
 use super::session::{Outbox, Session, SessionConfig, SessionState, Status};
+use super::store::Journal;
 use super::transport::{Clock, Transport};
 
 /// Receive buffer size: 16 KB, the largest frame the framer will accept.
@@ -57,8 +58,19 @@ pub struct Connection<T: Transport, C: Clock, A: Application> {
 
 impl<T: Transport, C: Clock, A: Application> Connection<T, C, A> {
     pub fn new(transport: T, clock: C, config: SessionConfig, app: A) -> io::Result<Self> {
-        let now = clock.now_ns();
-        let version = config.version;
+        let session = Session::new(config, clock.now_ns());
+        Self::with_session(transport, clock, session, app)
+    }
+
+    /// A connection whose session keeps its sequence numbers and sent
+    /// messages in `journal`.
+    pub fn with_journal(transport: T, clock: C, config: SessionConfig, journal: Journal, app: A) -> io::Result<Self> {
+        let session = Session::with_journal(config, journal, clock.now_ns());
+        Self::with_session(transport, clock, session, app)
+    }
+
+    fn with_session(transport: T, clock: C, session: Session, app: A) -> io::Result<Self> {
+        let version = session.config().version;
         Ok(Self {
             transport,
             clock,
@@ -66,7 +78,7 @@ impl<T: Transport, C: Clock, A: Application> Connection<T, C, A> {
             recv: RecvBuffer::new()?,
             framer: Framer::new(version),
             parser: Box::new(Parser::new()),
-            session: Session::new(config, now),
+            session,
             // Allocated once; only grows if the peer stops reading.
             pending: Pending { buf: Vec::with_capacity(64 * 1024), sent: 0 },
         })
@@ -105,6 +117,11 @@ impl<T: Transport, C: Clock, A: Application> Connection<T, C, A> {
             }
             if self.session.state() == SessionState::Active {
                 self.app.on_timer(&mut self.session.sender(now, &mut self.pending));
+            }
+            if let Some(journal) = self.session.journal_mut() {
+                // Timer flushes, and a failed per-message flush: the journal
+                // can't be trusted any more, so stop.
+                journal.on_timer(now)?;
             }
             self.flush()?;
 
@@ -434,5 +451,84 @@ mod tests {
         c.send("5", 12, &[]);
         c.expect("5", 2);
         assert_eq!(server.join().unwrap(), CloseReason::Session);
+    }
+
+    /// An acceptor with a journal in `dir`, taking `connections` connections
+    /// one after the other; returns each one's close reason.
+    fn spawn_journaled_acceptor(dir: std::path::PathBuf, flush: crate::fix::store::FlushPolicy, connections: usize)
+        -> (std::net::SocketAddr, thread::JoinHandle<Vec<CloseReason>>)
+    {
+        use crate::fix::store::JournalConfig;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut reasons = Vec::new();
+            for _ in 0..connections {
+                let (stream, _) = listener.accept().unwrap();
+                let journal_config = JournalConfig { dir: dir.clone(), entries: 1024, capacity: 1 << 20, flush, lock: false };
+                let journal = Journal::open(&journal_config, "GATEWAY", "CLIENT", SystemClock.now_ns()).unwrap();
+                let config = SessionConfig::new(Role::Acceptor, "GATEWAY", "CLIENT");
+                let transport = StdTcp::new(stream, Duration::from_millis(50)).unwrap();
+                let mut conn = Connection::with_journal(transport, SystemClock, config, journal, OrderAcker::default()).unwrap();
+                reasons.push(conn.run(&AtomicBool::new(false)).unwrap());
+            }
+            reasons
+        });
+        (addr, handle)
+    }
+
+    fn order(c: &mut Client, seq: u32, id: &str) {
+        c.send("D", seq, &[(tags::CL_ORD_ID, id), (tags::SYMBOL, "MSFT"), (tags::SIDE, "1"), (tags::TRANSACT_TIME, "20261025-17:00:00"),
+                           (tags::ORDER_QTY, "100"), (tags::ORD_TYPE, "1")]);
+    }
+
+    #[test]
+    fn resends_stored_messages_and_resumes_after_reconnect() {
+        use crate::fix::store::{FlushPolicy, TestDir};
+        for flush in [FlushPolicy::Never, FlushPolicy::Timer(Duration::from_millis(20)), FlushPolicy::EveryMessage] {
+            let dir = TestDir::new("loopback-resend");
+            let (addr, server) = spawn_journaled_acceptor(dir.0.clone(), flush, 3);
+
+            let mut c = Client::connect(addr);
+            c.send("A", 1, &[(tags::ENCRYPT_METHOD, "0"), (tags::HEART_BT_INT, "30")]);
+            assert_eq!(field(&c.expect("A", 2), 34), Some("1"));
+            order(&mut c, 2, "ord-1");
+            let er1 = c.expect("8", 2);
+            c.send("1", 3, &[(tags::TEST_REQ_ID, "t")]);
+            c.expect("0", 2);
+            order(&mut c, 4, "ord-2");
+            let er2 = c.expect("8", 2);
+            assert_eq!((field(&er1, 34), field(&er2, 34)), (Some("2"), Some("4")));
+
+            // Everything again: Logon and Heartbeat gap filled, the reports resent.
+            c.send("2", 5, &[(tags::BEGIN_SEQ_NO, "1"), (tags::END_SEQ_NO, "0")]);
+            let replay: Vec<String> = (0..4).map(|_| c.next(2).expect("resend")).collect();
+            let summary: Vec<_> = replay.iter().map(|m| (field(m, 35).unwrap(), field(m, 34).unwrap())).collect();
+            assert_eq!(summary, [("4", "1"), ("8", "2"), ("4", "3"), ("8", "4")]);
+            for (orig, again) in [(&er1, &replay[1]), (&er2, &replay[3])] {
+                assert_eq!((field(again, 43), field(again, 122)), (Some("Y"), field(orig, 52)));
+                assert_eq!((field(again, 11), field(again, 37), field(again, 17)), (field(orig, 11), field(orig, 37), field(orig, 17)));
+            }
+            c.send("5", 6, &[]);
+            c.expect("5", 2);
+            assert!(c.closed(2));
+
+            // Reconnect: both sides carry on, and the old reports are still there.
+            let mut c = Client::connect(addr);
+            c.send("A", 1, &[(tags::ENCRYPT_METHOD, "0"), (tags::HEART_BT_INT, "30")]);
+            assert_eq!(field(&c.expect("5", 2), 58), Some("MsgSeqNum too low"), "the gateway remembers our sequence numbers");
+            assert!(c.closed(2));
+            drop(c);
+            let mut c = Client::connect(addr);
+            c.send("A", 7, &[(tags::ENCRYPT_METHOD, "0"), (tags::HEART_BT_INT, "30")]);
+            let logon = c.expect("A", 2);
+            assert_eq!(field(&logon, 34), Some("7"), "{flush:?}: Logon 1, ER 2, Heartbeat 3, ER 4, Logout 5, Logout 6");
+            c.send("2", 8, &[(tags::BEGIN_SEQ_NO, "2"), (tags::END_SEQ_NO, "2")]);
+            let again = c.expect("8", 2);
+            assert_eq!((field(&again, 34), field(&again, 11), field(&again, 43)), (Some("2"), Some("ord-1"), Some("Y")));
+            c.send("5", 9, &[]);
+            c.expect("5", 2);
+            assert_eq!(server.join().unwrap(), [CloseReason::Session; 3]);
+        }
     }
 }

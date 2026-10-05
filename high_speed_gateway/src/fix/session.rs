@@ -7,8 +7,12 @@
 //!
 //! Covers logon (acceptor and initiator), heartbeats and TestRequest,
 //! sequence numbers (gaps -> ResendRequest, too low -> Logout, PossDup),
-//! ResendRequest (answered with a gap fill: there's no message store yet, so
-//! application messages aren't resent either), SequenceReset, Reject and Logout.
+//! ResendRequest, SequenceReset, Reject and Logout.
+//!
+//! With a `Journal` (see store/), both sequence numbers survive a restart and
+//! ResendRequests get our stored application messages back with
+//! PossDupFlag=Y and OrigSendingTime; admin messages, and anything the journal
+//! no longer holds, are gap filled. Without one, the whole range is gap filled.
 //!
 //! Application messages that pass the session checks go to an `Application`
 //! (see app.rs), in sequence order. Its refusals, and business rules the
@@ -19,12 +23,14 @@
 //! only while the session is active.
 
 use super::FixVersion;
-use super::app::{self, AppReject, Application, BusinessReject, Inbound};
+use super::app::{AppReject, Application, BusinessReject, Inbound};
+use super::messages;
 use super::decode;
-use super::encoder::{EncodeError, MessageWriter};
+use super::encoder::{EncodeError, MessageWriter, TRAILER_LEN};
 use super::message::Message;
 use super::parser::{ParseOutcome, RejectReason};
 use super::spec::{self, BusinessRejectReason, MsgType, SessionRejectReason, tags};
+use super::store::{Journal, StoredMessage};
 use super::validate::{Header, HeaderError, HeaderRules, SessionReject, validate_header};
 use super::views::{self, SessionMessage};
 
@@ -126,6 +132,8 @@ pub struct Session {
     test_request: Option<(u64, i64)>,
     test_req_counter: u64,
 
+    /// Our sent application messages and both sequence numbers, if persistent.
+    journal: Option<Journal>,
     out: [u8; OUT_BUF],
 }
 
@@ -148,8 +156,31 @@ impl Session {
             state_since: now,
             test_request: None,
             test_req_counter: 0,
+            journal: None,
             out: [0; OUT_BUF],
         }
+    }
+
+    /// A session that carries on from `journal`'s sequence numbers and keeps
+    /// them, and its sent application messages, there.
+    pub fn with_journal(config: SessionConfig, journal: Journal, now: i64) -> Self {
+        let mut session = Self::new(config, now);
+        session.next_in_seq = journal.next_in_seq();
+        session.next_out_seq = journal.next_out_seq();
+        session.journal = Some(journal);
+        session
+    }
+
+    pub fn journal(&self) -> Option<&Journal> {
+        self.journal.as_ref()
+    }
+
+    pub fn journal_mut(&mut self) -> Option<&mut Journal> {
+        self.journal.as_mut()
+    }
+
+    pub fn config(&self) -> &SessionConfig {
+        &self.config
     }
 
     pub fn state(&self) -> SessionState {
@@ -172,6 +203,9 @@ impl Session {
         if self.config.reset_on_logon {
             self.next_in_seq = 1;
             self.next_out_seq = 1;
+            if let Some(journal) = &mut self.journal {
+                journal.reset(now);
+            }
         }
         let (heart_bt_int, reset) = (self.config.heart_bt_int_secs, self.config.reset_on_logon);
         self.send_logon(heart_bt_int, reset, now, out);
@@ -230,6 +264,12 @@ impl Session {
 
     /// One frame from the framer, after parsing. Application messages go to `app`.
     pub fn on_frame(&mut self, outcome: ParseOutcome<'_>, now: i64, out: &mut impl Outbox, app: &mut impl Application) -> Status {
+        let status = self.on_outcome(outcome, now, out, app);
+        self.persist_sequences();
+        status
+    }
+
+    fn on_outcome(&mut self, outcome: ParseOutcome<'_>, now: i64, out: &mut impl Outbox, app: &mut impl Application) -> Status {
         match outcome {
             // Garbled: drop silently, sequence number unchanged.
             ParseOutcome::Garbled(_) => Status::Continue,
@@ -366,13 +406,7 @@ impl Session {
                 let id = tr.test_req_id;
                 self.send(MsgType::Heartbeat, now, out, |w| w.str(tags::TEST_REQ_ID, id).map(|_| ()));
             }
-            SessionMessage::ResendRequest(rr) => {
-                // Nothing is stored for resending yet, so fill the whole range.
-                let new_seq_no = self.next_out_seq;
-                if rr.begin_seq_no < new_seq_no {
-                    self.send_gap_fill(rr.begin_seq_no, new_seq_no, now, out);
-                }
-            }
+            SessionMessage::ResendRequest(rr) => self.resend(rr.begin_seq_no, rr.end_seq_no, now, out),
             SessionMessage::Reject(_) => {
                 // Our message was rejected. Nothing to undo for admin messages.
             }
@@ -406,7 +440,7 @@ impl Session {
     }
 
     fn on_app_message(&mut self, msg: &Message, header: &Header, now: i64, out: &mut impl Outbox, app: &mut impl Application) -> Status {
-        let view = match app::decode(msg, header) {
+        let view = match messages::decode(msg, header) {
             Ok(view) => view,
             Err(AppReject::Session(r)) => {
                 self.send_reject(&r, now, out);
@@ -447,6 +481,9 @@ impl Session {
             self.next_in_seq = 1;
             if self.config.role == Role::Acceptor {
                 self.next_out_seq = 1;
+                if let Some(journal) = &mut self.journal {
+                    journal.reset(now);
+                }
             }
         }
 
@@ -503,6 +540,49 @@ impl Session {
     fn close(&mut self, now: i64) -> Status {
         self.set_state(SessionState::Closed, now);
         Status::Disconnect
+    }
+
+    /// Writes both sequence numbers to the journal.
+    #[inline]
+    fn persist_sequences(&mut self) {
+        if let Some(journal) = &mut self.journal {
+            journal.set_seqs(self.next_in_seq, self.next_out_seq);
+        }
+    }
+
+    /// Answers a ResendRequest for [begin, end] (end 0: up to our last
+    /// message). Stored application messages go out again with
+    /// PossDupFlag=Y and OrigSendingTime; runs of admin messages and of
+    /// anything no longer stored become one SequenceReset-GapFill each.
+    fn resend(&mut self, begin: u32, end: u32, now: i64, out: &mut impl Outbox) {
+        let last = self.next_out_seq - 1;
+        let end = if end == 0 || end > last { last } else { end };
+        if begin > end {
+            return
+        }
+        // Older than the index window: overwritten for sure.
+        let first_stored = self.journal.as_ref().map_or(end + 1, |j| self.next_out_seq.saturating_sub(j.entries()).max(begin));
+        // First seq not yet answered.
+        let mut gap_from = begin;
+        for seq in first_stored..=end {
+            if self.journal.as_ref().and_then(|j| j.get(seq)).is_none() {
+                continue
+            }
+            if gap_from < seq {
+                self.send_gap_fill(gap_from, seq, now, out);
+                gap_from = seq;
+            }
+            let stored = self.journal.as_ref().and_then(|j| j.get(seq)).expect("checked above");
+            // Too long with the extra fields: left to the next gap fill.
+            if let Ok(bytes) = encode_resend(&mut self.out, &self.config, &stored, now) {
+                out.send(bytes);
+                self.last_tx = now;
+                gap_from = seq + 1;
+            }
+        }
+        if gap_from <= end {
+            self.send_gap_fill(gap_from, end + 1, now, out);
+        }
     }
 
     fn request_resend(&mut self, received: u32, now: i64, out: &mut impl Outbox) {
@@ -578,14 +658,14 @@ impl Session {
     /// SequenceReset-GapFill for [begin, new_seq_no). It carries MsgSeqNum =
     /// begin and doesn't advance our sequence.
     fn send_gap_fill(&mut self, begin: u32, new_seq_no: u32, now: i64, out: &mut impl Outbox) {
-        let bytes = encode(&mut self.out, &self.config, MsgType::SequenceReset, begin, now, |w| {
+        let encoded = encode(&mut self.out, &self.config, MsgType::SequenceReset, begin, now, |w| {
             w.bool(tags::POSS_DUP_FLAG, true)?
                 .timestamp(tags::ORIG_SENDING_TIME, now)?
                 .bool(tags::GAP_FILL_FLAG, true)?
                 .u64(tags::NEW_SEQ_NO, new_seq_no as u64)
                 .map(|_| ())
         });
-        out.send(bytes.expect("admin messages fit the output buffer"));
+        out.send(encoded.expect("admin messages fit the output buffer").0);
         self.last_tx = now;
     }
 
@@ -596,13 +676,19 @@ impl Session {
     }
 
     /// Like `send`; on an encoding error nothing is sent and the sequence
-    /// number isn't used.
+    /// number isn't used. Application messages are journaled.
     fn try_send(&mut self, msg_type: MsgType, now: i64, out: &mut impl Outbox,
                 body: impl FnOnce(&mut MessageWriter) -> Result<(), EncodeError>) -> Result<(), EncodeError> {
-        let bytes = encode(&mut self.out, &self.config, msg_type, self.next_out_seq, now, body)?;
+        let (bytes, body_start) = encode(&mut self.out, &self.config, msg_type, self.next_out_seq, now, body)?;
         out.send(bytes);
+        if let Some(journal) = &mut self.journal
+            && spec::message(msg_type.as_bytes()).is_some_and(|s| !s.admin)
+        {
+            journal.append(self.next_out_seq, now, bytes, body_start);
+        }
         self.next_out_seq += 1;
         self.last_tx = now;
+        self.persist_sequences();
         Ok(())
     }
 }
@@ -636,12 +722,28 @@ impl<O: Outbox> Sender<'_, O> {
     }
 }
 
-/// Header (49, 56, 34, 52) + `body` into `buf`.
+/// Header (49, 56, 34, 52) + `body` into `buf`. Returns the message and
+/// where `body` starts in it.
 fn encode<'b>(buf: &'b mut [u8], config: &SessionConfig, msg_type: MsgType, seq: u32, now: i64,
-              body: impl FnOnce(&mut MessageWriter) -> Result<(), EncodeError>) -> Result<&'b [u8], EncodeError> {
+              body: impl FnOnce(&mut MessageWriter) -> Result<(), EncodeError>) -> Result<(&'b [u8], usize), EncodeError> {
     let mut w = MessageWriter::new(buf, config.version, msg_type.as_bytes())?;
     w.header(config.our_comp_id.as_bytes(), config.their_comp_id.as_bytes(), seq, now)?;
+    let header_end = w.body_len();
     body(&mut w)?;
+    let body_len = w.body_len() - header_end;
+    let msg = w.finish()?;
+    Ok((msg, msg.len() - TRAILER_LEN - body_len))
+}
+
+/// A stored message sent again: fresh header with its MsgSeqNum,
+/// PossDupFlag=Y and its original SendingTime as OrigSendingTime, then its body.
+fn encode_resend<'b>(buf: &'b mut [u8], config: &SessionConfig, stored: &StoredMessage, now: i64) -> Result<&'b [u8], EncodeError> {
+    let msg_type = stored.msg_type().ok_or(EncodeError::InvalidValue { tag: tags::MSG_TYPE })?;
+    let mut w = MessageWriter::new(buf, config.version, msg_type)?;
+    w.header(config.our_comp_id.as_bytes(), config.their_comp_id.as_bytes(), stored.seq, now)?
+        .bool(tags::POSS_DUP_FLAG, true)?
+        .timestamp(tags::ORIG_SENDING_TIME, stored.sending_time)?
+        .raw_fields(stored.body())?;
     w.finish()
 }
 
@@ -660,11 +762,13 @@ fn parser_reason(reason: RejectReason) -> SessionRejectReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fix::app::{AppMessage, NoApplication};
+    use crate::fix::app::NoApplication;
+    use crate::fix::messages::AppMessage;
     use crate::fix::demo::{OneOrder, OrderSpec};
     use crate::fix::decode::Decimal;
     use crate::fix::parser::Parser;
     use crate::fix::spec::{ExecType, OrdStatus, Side};
+    use crate::fix::store::{FlushPolicy, JournalConfig, TestDir};
 
     const T0: i64 = 1_792_947_600 * SECOND; // 2026-10-25 17:00:00 UTC
     const ORDER: &str = "11=ord-1|55=MSFT|54=1|60=20261025-17:00:00|38=100|40=2|44=412.5|";
@@ -689,10 +793,10 @@ mod tests {
             }
             if let AppMessage::NewOrderSingle(o) = &msg.view && self.ack {
                 let result = send.send(MsgType::ExecutionReport, |w| {
-                    w.str(tags::ORDER_ID, "O1")?.str(tags::CL_ORD_ID, o.cl_ord_id)?.str(tags::EXEC_ID, "E1")?
+                    w.str(tags::ORDER_ID, "O1")?.str(tags::CL_ORD_ID, o.cl_ord_id())?.str(tags::EXEC_ID, "E1")?
                         .bytes(tags::EXEC_TYPE, ExecType::New.as_bytes())?.bytes(tags::ORD_STATUS, OrdStatus::New.as_bytes())?
-                        .str(tags::SYMBOL, o.instrument.symbol)?.bytes(tags::SIDE, o.side.as_bytes())?
-                        .decimal(tags::LEAVES_QTY, o.order_qty)?.u64(tags::CUM_QTY, 0)?.u64(tags::AVG_PX, 0).map(|_| ())
+                        .str(tags::SYMBOL, o.instrument().symbol())?.bytes(tags::SIDE, o.side().as_bytes())?
+                        .decimal(tags::LEAVES_QTY, o.order_qty())?.u64(tags::CUM_QTY, 0)?.u64(tags::AVG_PX, 0).map(|_| ())
                 });
                 self.send_results.push(result);
             }
@@ -714,6 +818,16 @@ mod tests {
         fn acceptor() -> Self {
             let config = SessionConfig::new(Role::Acceptor, "GATEWAY", "CLIENT");
             Self { session: Session::new(config, T0), parser: Box::new(Parser::new()), seq: 1, now: T0, sent: Vec::new(), app: Recorder::default() }
+        }
+
+        /// An acceptor keeping its journal in `dir`, acknowledging orders.
+        fn journaled(dir: &TestDir, entries: u32) -> Self {
+            let config = JournalConfig { dir: dir.0.clone(), entries, capacity: 64 * 1024, flush: FlushPolicy::Never, lock: false };
+            let journal = Journal::open(&config, "GATEWAY", "CLIENT", T0).unwrap();
+            let session = Session::with_journal(SessionConfig::new(Role::Acceptor, "GATEWAY", "CLIENT"), journal, T0);
+            let seq = session.next_in_seq();
+            let app = Recorder { ack: true, ..Recorder::default() };
+            Self { session, parser: Box::new(Parser::new()), seq, now: T0, sent: Vec::new(), app }
         }
 
         fn logged_on() -> Self {
@@ -762,6 +876,13 @@ mod tests {
         let prefix = format!("|{tag}=");
         let start = msg.find(&prefix)? + prefix.len();
         Some(&msg[start..start + msg[start..].find('|')?])
+    }
+
+    /// Everything after field `tag` up to the CheckSum.
+    fn after<'m>(msg: &'m str, tag: u16) -> &'m str {
+        let value = field(msg, tag).unwrap();
+        let start = msg.find(&format!("|{tag}={value}|")).unwrap() + tag.to_string().len() + value.len() + 3;
+        &msg[start..msg.rfind("10=").unwrap()]
     }
 
     #[test]
@@ -1183,5 +1304,123 @@ mod tests {
         let _ = p.send("V", "");
         let out = p.take();
         assert_eq!((out.len(), field(&out[0], 35)), (1, Some("2")));
+    }
+
+    #[test]
+    fn resend_replays_stored_application_messages() {
+        let dir = TestDir::new("session-resend");
+        let mut p = Peer::journaled(&dir, 64);
+        let _ = p.send("A", "98=0|108=30|");
+        let _ = p.send("D", ORDER);                       // ER 2
+        let _ = p.send("1", "112=t|");                    // Heartbeat 3
+        p.now += SECOND;
+        let _ = p.send("D", &ORDER.replace("ord-1", "ord-2"));  // ER 4
+        let _ = p.send("D", &ORDER.replace("ord-1", "bad-3"));  // 35=j 5
+        let sent = p.take();
+        assert_eq!(sent.iter().map(|m| field(m, 35).unwrap()).collect::<Vec<_>>(), ["A", "8", "0", "8", "j"]);
+
+        p.now += SECOND;
+        let _ = p.send("2", "7=1|16=0|");
+        let out = p.take();
+        let summary: Vec<_> = out.iter().map(|m| (field(m, 35).unwrap(), field(m, 34).unwrap(), field(m, 36))).collect();
+        assert_eq!(summary, [("4", "1", Some("2")), ("8", "2", None), ("4", "3", Some("4")), ("8", "4", None), ("j", "5", None)]);
+        for (orig, again) in [(&sent[1], &out[1]), (&sent[3], &out[3]), (&sent[4], &out[4])] {
+            assert_eq!(field(again, 43), Some("Y"));
+            assert_eq!(field(again, 122), field(orig, 52), "OrigSendingTime is the first SendingTime");
+            assert_ne!(field(again, 52), field(orig, 52));
+            assert_eq!(after(again, 122), after(orig, 52), "same body");
+        }
+        assert_eq!(p.session.next_out_seq(), 6, "resends don't use sequence numbers");
+
+        // A bounded range, starting on an admin message.
+        let _ = p.send("2", "7=3|16=4|");
+        let out = p.take();
+        assert_eq!(out.iter().map(|m| (field(m, 35).unwrap(), field(m, 34).unwrap())).collect::<Vec<_>>(), [("4", "3"), ("8", "4")]);
+        assert_eq!(field(&out[0], 36), Some("4"));
+    }
+
+    #[test]
+    fn resend_gap_fills_what_fell_out_of_the_journal() {
+        let dir = TestDir::new("session-window");
+        let mut p = Peer::journaled(&dir, 4);
+        let _ = p.send("A", "98=0|108=30|");
+        for k in 0..6 {
+            let _ = p.send("D", &ORDER.replace("ord-1", &format!("ord-{k}")));  // ERs 2..=7
+        }
+        p.take();
+        let _ = p.send("2", "7=2|16=0|");
+        let out = p.take();
+        let summary: Vec<_> = out.iter().map(|m| (field(m, 35).unwrap(), field(m, 34).unwrap(), field(m, 36))).collect();
+        // The last 4 sequence numbers (4..=7) are still in the index.
+        assert_eq!(summary, [("4", "2", Some("4")), ("8", "4", None), ("8", "5", None), ("8", "6", None), ("8", "7", None)]);
+        assert_eq!(field(&out[1], 11), Some("ord-2"));
+    }
+
+    #[test]
+    fn sequence_numbers_survive_a_restart() {
+        let dir = TestDir::new("session-restart");
+        let mut p = Peer::journaled(&dir, 64);
+        let _ = p.send("A", "98=0|108=30|");
+        let _ = p.send("D", ORDER);
+        let _ = p.send("0", "");
+        assert_eq!((p.session.next_in_seq(), p.session.next_out_seq()), (4, 3));
+        let next = p.seq;
+        drop(p);
+
+        let mut p = Peer::journaled(&dir, 64);
+        assert_eq!((p.session.next_in_seq(), p.session.next_out_seq(), p.seq), (4, 3, next));
+        let _ = p.send("A", "98=0|108=30|");
+        let out = p.take();
+        assert_eq!((field(&out[0], 35), field(&out[0], 34)), (Some("A"), Some("3")));
+        assert_eq!(p.session.state(), SessionState::Active);
+        // The ExecutionReport from before the restart can still be resent.
+        let _ = p.send("2", "7=2|16=2|");
+        let out = p.take();
+        assert_eq!((field(&out[0], 35), field(&out[0], 34), field(&out[0], 11)), (Some("8"), Some("2"), Some("ord-1")));
+    }
+
+    #[test]
+    fn logon_with_reset_clears_the_journal() {
+        let dir = TestDir::new("session-reset");
+        let mut p = Peer::journaled(&dir, 64);
+        let _ = p.send("A", "98=0|108=30|");
+        let _ = p.send("D", ORDER);
+        drop(p);
+
+        let mut p = Peer::journaled(&dir, 64);
+        p.seq = 1;
+        let _ = p.send("A", "98=0|108=30|141=Y|");
+        let out = p.take();
+        assert_eq!((field(&out[0], 34), field(&out[0], 141)), (Some("1"), Some("Y")));
+        let journal = p.session.journal().unwrap();
+        assert_eq!((journal.next_in_seq(), journal.next_out_seq()), (2, 2));
+        assert!(journal.get(2).is_none(), "the old ExecutionReport is gone");
+        let _ = p.send("2", "7=1|16=0|");
+        let out = p.take();
+        assert_eq!((out.len(), field(&out[0], 35), field(&out[0], 36)), (1, Some("4"), Some("2")));
+    }
+
+    #[test]
+    fn initiator_reset_clears_the_journal() {
+        let dir = TestDir::new("session-initiator-reset");
+        let jconfig = JournalConfig { dir: dir.0.clone(), entries: 64, capacity: 64 * 1024, flush: FlushPolicy::Never, lock: false };
+        let mut journal = Journal::open(&jconfig, "CLIENT", "GATEWAY", T0).unwrap();
+        journal.set_seqs(40, 50);
+        let mut config = SessionConfig::new(Role::Initiator, "CLIENT", "GATEWAY");
+        let mut session = Session::with_journal(config.clone(), journal, T0);
+        assert_eq!((session.next_in_seq(), session.next_out_seq()), (40, 50));
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let _ = session.start(T0, &mut out);
+        assert_eq!(field(&String::from_utf8_lossy(&out[0]).replace('\x01', "|"), 34), Some("50"));
+        drop(session);
+
+        config.reset_on_logon = true;
+        let journal = Journal::open(&jconfig, "CLIENT", "GATEWAY", T0).unwrap();
+        assert_eq!(journal.next_out_seq(), 51);
+        let mut session = Session::with_journal(config, journal, T0);
+        out.clear();
+        let _ = session.start(T0, &mut out);
+        assert_eq!(field(&String::from_utf8_lossy(&out[0]).replace('\x01', "|"), 34), Some("1"));
+        assert_eq!((session.journal().unwrap().next_in_seq(), session.journal().unwrap().next_out_seq()), (1, 2));
     }
 }

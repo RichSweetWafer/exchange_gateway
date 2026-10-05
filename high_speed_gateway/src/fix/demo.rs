@@ -6,7 +6,8 @@
 
 use tracing::info;
 
-use super::app::{AppMessage, Application, BusinessReject, Inbound, Instrument};
+use super::app::{Application, BusinessReject, Inbound};
+use super::messages::AppMessage;
 use super::decode::Decimal;
 use super::encoder::{EncodeError, MessageWriter};
 use super::session::{Outbox, Sender};
@@ -28,7 +29,7 @@ struct Report<'a> {
     exec_type: ExecType,
     ord_status: OrdStatus,
     rej_reason: Option<OrdRejReason>,
-    instrument: Instrument<'a>,
+    symbol: &'a str,
     side: Side,
     order_qty: Option<Decimal>,
     ord_type: Option<OrdType>,
@@ -53,7 +54,7 @@ impl OrderAcker {
             if let Some(reason) = r.rej_reason {
                 w.bytes(tags::ORD_REJ_REASON, reason.as_bytes())?;
             }
-            w.str(tags::SYMBOL, r.instrument.symbol)?.bytes(tags::SIDE, r.side.as_bytes())?;
+            w.str(tags::SYMBOL, r.symbol)?.bytes(tags::SIDE, r.side.as_bytes())?;
             if let Some(qty) = r.order_qty {
                 w.decimal(tags::ORDER_QTY, qty)?;
             }
@@ -91,34 +92,35 @@ impl Application for OrderAcker {
         match &msg.view {
             AppMessage::NewOrderSingle(o) => {
                 let order_id = self.order_id(None);
-                let accepted = o.order_qty.is_positive();
-                info!(cl_ord_id = o.cl_ord_id, symbol = o.instrument.symbol, side = ?o.side, accepted, "order");
+                let (cl_ord_id, symbol, side, order_qty) = (o.cl_ord_id(), o.instrument().symbol(), o.side(), o.order_qty());
+                let accepted = order_qty.is_positive();
+                info!(cl_ord_id, symbol, ?side, accepted, "order");
                 let report = Report {
-                    cl_ord_id: o.cl_ord_id,
+                    cl_ord_id,
                     orig_cl_ord_id: None,
                     exec_type: if accepted { ExecType::New } else { ExecType::Rejected },
                     ord_status: if accepted { OrdStatus::New } else { OrdStatus::Rejected },
                     rej_reason: (!accepted).then_some(OrdRejReason::IncorrectQuantity),
-                    instrument: o.instrument,
-                    side: o.side,
-                    order_qty: Some(o.order_qty),
-                    ord_type: Some(o.ord_type),
-                    price: o.price,
-                    leaves_qty: if accepted { o.order_qty } else { Decimal::new(0, 0) },
+                    symbol,
+                    side,
+                    order_qty: Some(order_qty),
+                    ord_type: Some(o.ord_type()),
+                    price: o.price(),
+                    leaves_qty: if accepted { order_qty } else { Decimal::new(0, 0) },
                 };
                 self.report(order_id, report, send);
             }
             AppMessage::OrderCancelRequest(c) => {
-                let order_id = self.order_id(c.order_id);
+                let order_id = self.order_id(c.order_id());
                 let report = Report {
-                    cl_ord_id: c.cl_ord_id,
-                    orig_cl_ord_id: Some(c.orig_cl_ord_id),
+                    cl_ord_id: c.cl_ord_id(),
+                    orig_cl_ord_id: Some(c.orig_cl_ord_id()),
                     exec_type: ExecType::Canceled,
                     ord_status: OrdStatus::Canceled,
                     rej_reason: None,
-                    instrument: c.instrument,
-                    side: c.side,
-                    order_qty: c.order_qty,
+                    symbol: c.instrument().symbol(),
+                    side: c.side(),
+                    order_qty: c.order_qty(),
                     ord_type: None,
                     price: None,
                     leaves_qty: Decimal::new(0, 0),
@@ -126,20 +128,21 @@ impl Application for OrderAcker {
                 self.report(order_id, report, send);
             }
             AppMessage::OrderCancelReplaceRequest(r) => {
-                let order_id = self.order_id(r.order_id);
-                let o = &r.order;
+                let order_id = self.order_id(r.order_id());
+                let o = r.order();
+                let order_qty = o.order_qty();
                 let report = Report {
-                    cl_ord_id: o.cl_ord_id,
-                    orig_cl_ord_id: Some(r.orig_cl_ord_id),
+                    cl_ord_id: o.cl_ord_id(),
+                    orig_cl_ord_id: Some(r.orig_cl_ord_id()),
                     exec_type: ExecType::Replaced,
                     ord_status: OrdStatus::Replaced,
                     rej_reason: None,
-                    instrument: o.instrument,
-                    side: o.side,
-                    order_qty: Some(o.order_qty),
-                    ord_type: Some(o.ord_type),
-                    price: o.price,
-                    leaves_qty: o.order_qty,
+                    symbol: o.instrument().symbol(),
+                    side: o.side(),
+                    order_qty: Some(order_qty),
+                    ord_type: Some(o.ord_type()),
+                    price: o.price(),
+                    leaves_qty: order_qty,
                 };
                 self.report(order_id, report, send);
             }
@@ -204,8 +207,9 @@ impl Application for OneOrder {
     {
         match &msg.view {
             AppMessage::ExecutionReport(e) => {
-                info!(order_id = e.order_id, exec_id = e.exec_id, exec_type = ?e.exec_type, ord_status = ?e.ord_status, "execution report");
-                self.reports.push((e.exec_type, e.ord_status));
+                let (exec_type, ord_status) = (e.exec_type(), e.ord_status());
+                info!(order_id = e.order_id(), exec_id = e.exec_id(), ?exec_type, ?ord_status, "execution report");
+                self.reports.push((exec_type, ord_status));
                 Ok(())
             }
             AppMessage::BusinessMessageReject(b) => {
